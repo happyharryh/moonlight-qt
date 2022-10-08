@@ -374,6 +374,7 @@ void StreamCommandLineParser::parse(const QStringList &args, StreamingPreference
     parser.addChoiceOption("capture-system-keys", "capture system key combos", m_CaptureSysKeysModeMap.keys());
     parser.addChoiceOption("video-codec", "video codec", m_VideoCodecMap.keys());
     parser.addChoiceOption("video-decoder", "video decoder", m_VideoDecoderMap.keys());
+    parser.addToggleOption("combine-joy-cons", "Combine Joy-Con (L) and Joy-Con (R)");
 
     if (!parser.parse(args)) {
         parser.showError(parser.errorText());
@@ -499,6 +500,9 @@ void StreamCommandLineParser::parse(const QStringList &args, StreamingPreference
     if (parser.isSet("video-decoder")) {
         preferences->videoDecoderSelection = mapValue(m_VideoDecoderMap, parser.getChoiceOptionValue("video-decoder"));
     }
+
+    // Resolve --combine-joy-cons and --no-combine-joy-cons options
+    preferences->combineJoyCons = parser.getToggleOptionValue("combine-joy-cons", preferences->combineJoyCons);
 
     // This method will not return and terminates the process if --version or
     // --help is specified

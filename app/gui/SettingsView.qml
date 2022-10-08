@@ -1227,6 +1227,30 @@ Flickable {
                     ToolTip.visible: hovered
                     ToolTip.text: qsTr("Allows Moonlight to capture gamepad inputs even if it's not the current window in focus")
                 }
+
+                CheckBox {
+                    id: combineJoyConsCheck
+                    width: parent.width
+                    text: qsTr("Combine Joy-Con (L) and Joy-Con (R)")
+                    font.pointSize: 12
+                    checked: StreamingPreferences.combineJoyCons
+                    onCheckedChanged: {
+                        // Check if the value changed (this is called on init too)
+                        if (StreamingPreferences.combineJoyCons !== checked) {
+                            StreamingPreferences.combineJoyCons = checked
+
+                            // Save and restart SdlGamepadKeyNavigation so it can pull the new value
+                            StreamingPreferences.save()
+                            SdlGamepadKeyNavigation.disable()
+                            SdlGamepadKeyNavigation.enable()
+                        }
+                    }
+
+                    ToolTip.delay: 1000
+                    ToolTip.timeout: 5000
+                    ToolTip.visible: hovered
+                    ToolTip.text: qsTr("Combine Joy-Con (L) and Joy-Con (R)")
+                }
             }
         }
 

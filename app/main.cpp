@@ -43,6 +43,7 @@
 #include "streaming/session.h"
 #include "settings/streamingpreferences.h"
 #include "gui/sdlgamepadkeynavigation.h"
+#include "streaming/cemuhook.h"
 
 #if !defined(QT_DEBUG) && defined(Q_OS_WIN32)
 // Log to file for release Windows builds
@@ -694,6 +695,9 @@ int main(int argc, char *argv[])
         if (engine.rootObjects().isEmpty())
             return -1;
     }
+
+    Cemuhook::server = new Cemuhook::Server();
+    Cemuhook::server->bind(QHostAddress::AnyIPv4, PORT);
 
     int err = app.exec();
 

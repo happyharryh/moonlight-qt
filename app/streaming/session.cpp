@@ -1787,6 +1787,9 @@ void Session::execInternal()
         case SDL_FINGERUP:
             m_InputHandler->handleTouchFingerEvent(&event.tfinger);
             break;
+        case SDL_CONTROLLERSENSORUPDATE:
+            m_InputHandler->handleControllerSensorEvent(&event.csensor);
+            break;
         }
     }
 

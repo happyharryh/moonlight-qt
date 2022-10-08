@@ -3,6 +3,7 @@
 #include <Limelight.h>
 #include <SDL.h>
 #include "settings/mappingmanager.h"
+#include "streaming/cemuhook.h"
 
 #include <QtMath>
 
@@ -296,6 +297,51 @@ void SdlInputHandler::handleControllerButtonEvent(SDL_ControllerButtonEvent* eve
     }
 }
 
+void SdlInputHandler::handleControllerSensorEvent(SDL_ControllerSensorEvent* event)
+{
+    SDL_JoystickID gameControllerId = event->which;
+    GamepadState* state = findStateForGamepad(gameControllerId);
+    if (state == NULL) {
+        return;
+    }
+
+    // Batch all pending axis motion events for this gamepad to save CPU time
+    SDL_Event nextEvent;
+    for (;;) {
+        switch (event->sensor)
+        {
+            case SDL_SENSOR_ACCEL:
+            case SDL_SENSOR_GYRO:
+                Cemuhook::server->handleSend(event, state);
+                break;
+            default:
+                SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                            "Unhandled controller sensor: %d",
+                            event->sensor);
+                return;
+        }
+
+        // Check for another event to batch with
+        if (SDL_PeepEvents(&nextEvent, 1, SDL_PEEKEVENT, SDL_CONTROLLERSENSORUPDATE, SDL_CONTROLLERSENSORUPDATE) <= 0) {
+            break;
+        }
+
+        event = &nextEvent.csensor;
+        if (event->which != gameControllerId) {
+            // Stop batching if a different gamepad interrupts us
+            break;
+        }
+
+        // Remove the next event to batch
+        SDL_PeepEvents(&nextEvent, 1, SDL_GETEVENT, SDL_CONTROLLERSENSORUPDATE, SDL_CONTROLLERSENSORUPDATE);
+    }
+
+    // Only send the gamepad state to the host if it's not in mouse emulation mode
+    if (state->mouseEmulationTimer == 0) {
+        sendGamepadState(state);
+    }
+}
+
 void SdlInputHandler::handleControllerDeviceEvent(SDL_ControllerDeviceEvent* event)
 {
     GamepadState* state;
@@ -419,6 +465,13 @@ void SdlInputHandler::handleControllerDeviceEvent(SDL_ControllerDeviceEvent* eve
         }
         else {
             SDL_assert(m_GamepadMask == 0x1);
+        }
+
+        if (SDL_GameControllerHasSensor(state->controller, SDL_SENSOR_ACCEL)) {
+            SDL_GameControllerSetSensorEnabled(state->controller, SDL_SENSOR_ACCEL, SDL_TRUE);
+        }
+        if (SDL_GameControllerHasSensor(state->controller, SDL_SENSOR_GYRO)) {
+            SDL_GameControllerSetSensorEnabled(state->controller, SDL_SENSOR_GYRO, SDL_TRUE);
         }
 
         // Send an empty event to tell the PC we've arrived

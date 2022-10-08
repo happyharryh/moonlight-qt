@@ -61,6 +61,8 @@ public:
 
     void handleControllerButtonEvent(SDL_ControllerButtonEvent* event);
 
+    void handleControllerSensorEvent(SDL_ControllerSensorEvent* event);
+
     void handleControllerDeviceEvent(SDL_ControllerDeviceEvent* event);
 
     void handleJoystickArrivalEvent(SDL_JoyDeviceEvent* event);

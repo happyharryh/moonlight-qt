@@ -696,8 +696,7 @@ int main(int argc, char *argv[])
             return -1;
     }
 
-    Cemuhook::server = new Cemuhook::Server();
-    Cemuhook::server->bind(QHostAddress::AnyIPv4, PORT);
+    Cemuhook::Server::init();
 
     int err = app.exec();
 

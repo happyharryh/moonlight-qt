@@ -1,16 +1,10 @@
 #pragma once
 
-#include <QReadWriteLock>
 #include <QUdpSocket>
 
 #include "input/input.h"
 
 #define VERSION 1001
-#define BUFLEN 100
-#define CHECK_INTERVAL 1000
-#define CHECK_TIMEOUT 5000
-#define SAMPLE_FREQUENCY 1000
-#define PORT 26760
 
 namespace Cemuhook {
 
@@ -129,16 +123,20 @@ struct DataResponse {
 class Server : public QUdpSocket {
     Q_OBJECT
 
-public:
-    explicit Server(QObject *parent = nullptr);
-    void handleSend(SDL_ControllerSensorEvent* event, GamepadState* state = nullptr);
+signals:
+    void sendSignal(const SDL_ControllerSensorEvent& event, const GamepadState& gState);
 
-private slots:
-    void handleReceive();
+public:
+    static void init(const QHostAddress& addr = QHostAddress::Any, uint16_t port = 26760, QObject *parent = nullptr);
+    static void send(SDL_ControllerSensorEvent* event, GamepadState* state = nullptr);
 
 private:
-    uint32_t serverId;
+    Server(QObject *parent = nullptr);
+    void handleReceive();
+    void handleSend(const SDL_ControllerSensorEvent& event, const GamepadState& gState);
     void timerEvent(QTimerEvent*) override;
+
+    uint32_t serverId;
 
     struct Client {
         uint32_t id;
@@ -148,7 +146,6 @@ private:
         uint32_t lastTimestamp;
     };
     QList<Client> clients;
-    QReadWriteLock clientsMutex;
 
     struct JoystickState {
         DataResponse::MotionData tmpMotionData[3];
@@ -161,8 +158,9 @@ private:
         uint32_t sampleTimestamp = 0;
         uint32_t sampleCount = 0;
     } jStates[MAX_GAMEPADS];
-};
 
-extern Server* server;
+    static Server* server;
+    static QThread* thread;
+};
 
 }

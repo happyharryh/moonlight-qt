@@ -312,7 +312,7 @@ void SdlInputHandler::handleControllerSensorEvent(SDL_ControllerSensorEvent* eve
         {
             case SDL_SENSOR_ACCEL:
             case SDL_SENSOR_GYRO:
-                Cemuhook::server->handleSend(event, state);
+                Cemuhook::Server::send(event, state);
                 break;
             default:
                 SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,

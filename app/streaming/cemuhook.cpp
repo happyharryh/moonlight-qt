@@ -98,7 +98,7 @@ void Server::handleReceive() {
                 {                                                   // response
                     0,                                                  // slot
                     SharedResponse::SlotState::NOT_CONNECTED,           // slotState
-                    SharedResponse::DeviceModel::FULL_GYRO,             // deviceModel
+                    SharedResponse::DeviceModel::NOT_APPLICABLE,        // deviceModel
                     SharedResponse::Connection::NOT_APPLICABLE,         // connection
                     {},                                                 // mac
                     SharedResponse::Battery::NOT_APPLICABLE,            // battery
@@ -114,12 +114,28 @@ void Server::handleReceive() {
                 res.response.slot = slot;
                 if (SDL_Joystick* joystick = SDL_JoystickFromPlayerIndex(slot)) {
                     res.response.slotState = SharedResponse::SlotState::CONNECTED;
-                    sscanf_s(SDL_JoystickGetSerial(joystick), "%hhx-%hhx-%hhx-%hhx-%hhx-%hhx",
-                             &res.response.mac[0], &res.response.mac[1], &res.response.mac[2],
-                             &res.response.mac[3], &res.response.mac[4], &res.response.mac[5]);
+
+                    SDL_GameController* gameController = SDL_GameControllerFromInstanceID(
+                        SDL_JoystickInstanceID(joystick));
+                    if (SDL_GameControllerIsSensorEnabled(gameController, SDL_SENSOR_ACCEL) &&
+                        SDL_GameControllerIsSensorEnabled(gameController, SDL_SENSOR_GYRO)) {
+                        res.response.deviceModel = SharedResponse::DeviceModel::FULL_GYRO;
+                    } else {
+                        res.response.deviceModel = SharedResponse::DeviceModel::DO_NOT_USE;
+                    }
+
+                    if (const char* serial = SDL_JoystickGetSerial(joystick)) {
+                        sscanf_s(serial, "%hhx-%hhx-%hhx-%hhx-%hhx-%hhx",
+                                 &res.response.mac[0], &res.response.mac[1], &res.response.mac[2],
+                                 &res.response.mac[3], &res.response.mac[4], &res.response.mac[5]);
+                    } else {
+                        memset(res.response.mac, 0, sizeof(res.response.mac));
+                    }
+
                     res.response.battery = SharedResponse::batteryMap[SDL_JoystickCurrentPowerLevel(joystick)];
                 } else {
                     res.response.slotState = SharedResponse::SlotState::NOT_CONNECTED;
+                    res.response.deviceModel = SharedResponse::DeviceModel::NOT_APPLICABLE;
                     memset(res.response.mac, 0, sizeof(res.response.mac));
                     res.response.battery = SharedResponse::Battery::NOT_APPLICABLE;
                 }
@@ -228,13 +244,20 @@ void Server::handleSend(const SDL_ControllerSensorEvent& event, const GamepadSta
     };
 
     res.response.slot = slot;
-    sscanf_s(SDL_JoystickGetSerial(joystick), "%hhx-%hhx-%hhx-%hhx-%hhx-%hhx",
-             &res.response.mac[0], &res.response.mac[1], &res.response.mac[2],
-             &res.response.mac[3], &res.response.mac[4], &res.response.mac[5]);
+
+    if (const char* serial = SDL_JoystickGetSerial(joystick)) {
+        sscanf_s(serial, "%hhx-%hhx-%hhx-%hhx-%hhx-%hhx",
+                 &res.response.mac[0], &res.response.mac[1], &res.response.mac[2],
+                 &res.response.mac[3], &res.response.mac[4], &res.response.mac[5]);
+    } else {
+        memset(res.response.mac, 0, sizeof(res.response.mac));
+    }
+
     res.response.battery = SharedResponse::batteryMap[SDL_JoystickCurrentPowerLevel(joystick)];
+
     memcpy(&res.motion, motion, sizeof(res.motion));
 
-    if (gState.jsId == event.which) {
+    if (gState.controller) {
         res.buttons = (gState.buttons & BACK_FLAG ? 0x1 : 0) |
                       (gState.buttons & LS_CLK_FLAG ? 0x2 : 0) |
                       (gState.buttons & RS_CLK_FLAG ? 0x4 : 0) |

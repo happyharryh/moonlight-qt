@@ -4,6 +4,7 @@
 #include "settings/mappingmanager.h"
 #include "path.h"
 #include "utils.h"
+#include "streaming/cemuhook.h"
 
 #include <QtGlobal>
 #include <QDir>
@@ -35,7 +36,8 @@ SdlInputHandler::SdlInputHandler(StreamingPreferences& prefs, NvComputer*, int s
       m_RightButtonReleaseTimer(0),
       m_DragTimer(0),
       m_DragButton(0),
-      m_NumFingersDown(0)
+      m_NumFingersDown(0),
+      m_CemuhookServer(prefs.cemuhookServer)
 {
     // System keys are always captured when running without a DE
     if (!WMUtils::isRunningDesktopEnvironment()) {
@@ -204,6 +206,10 @@ SdlInputHandler::SdlInputHandler(StreamingPreferences& prefs, NvComputer*, int s
     }
 
     m_MouseMoveTimer = SDL_AddTimer(pollingInterval, SdlInputHandler::mouseMoveTimerCallback, this);
+
+    if (m_CemuhookServer) {
+        Cemuhook::Server::init();
+    }
 }
 
 SdlInputHandler::~SdlInputHandler()
@@ -254,6 +260,8 @@ SdlInputHandler::~SdlInputHandler()
     // video backends.
     SDL_ShowCursor(SDL_DISABLE);
 #endif
+
+    Cemuhook::Server::destroy();
 }
 
 void SdlInputHandler::setWindow(SDL_Window *window)

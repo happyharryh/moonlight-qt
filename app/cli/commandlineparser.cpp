@@ -374,6 +374,7 @@ void StreamCommandLineParser::parse(const QStringList &args, StreamingPreference
     parser.addChoiceOption("capture-system-keys", "capture system key combos", m_CaptureSysKeysModeMap.keys());
     parser.addChoiceOption("video-codec", "video codec", m_VideoCodecMap.keys());
     parser.addChoiceOption("video-decoder", "video decoder", m_VideoDecoderMap.keys());
+    parser.addToggleOption("cemuhook-server", "CemuHook Server");
 
     if (!parser.parse(args)) {
         parser.showError(parser.errorText());
@@ -499,6 +500,9 @@ void StreamCommandLineParser::parse(const QStringList &args, StreamingPreference
     if (parser.isSet("video-decoder")) {
         preferences->videoDecoderSelection = mapValue(m_VideoDecoderMap, parser.getChoiceOptionValue("video-decoder"));
     }
+
+    // Resolve --cemuhook-server and --no-cemuhook-server options
+    preferences->cemuhookServer = parser.getToggleOptionValue("cemuhook-server", preferences->cemuhookServer);
 
     // This method will not return and terminates the process if --version or
     // --help is specified

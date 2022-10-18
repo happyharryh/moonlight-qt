@@ -44,6 +44,7 @@
 #define SER_CAPTURESYSKEYS "capturesyskeys"
 #define SER_KEEPAWAKE "keepawake"
 #define SER_LANGUAGE "language"
+#define SER_CEMUHOOKSERVER "cemuhookserver"
 
 #define CURRENT_DEFAULT_VER 2
 
@@ -121,6 +122,7 @@ void StreamingPreferences::reload()
                                                                                                                  : UIDisplayMode::UI_MAXIMIZED)).toInt());
     language = static_cast<Language>(settings.value(SER_LANGUAGE,
                                                     static_cast<int>(Language::LANG_AUTO)).toInt());
+    cemuhookServer = settings.value(SER_CEMUHOOKSERVER, false).toBool();
 
 
     // Perform default settings updates as required based on last default version
@@ -286,6 +288,7 @@ void StreamingPreferences::save()
     settings.setValue(SER_SWAPFACEBUTTONS, swapFaceButtons);
     settings.setValue(SER_CAPTURESYSKEYS, captureSysKeysMode);
     settings.setValue(SER_KEEPAWAKE, keepAwake);
+    settings.setValue(SER_CEMUHOOKSERVER, cemuhookServer);
 }
 
 int StreamingPreferences::getDefaultBitrate(int width, int height, int fps)

@@ -149,7 +149,6 @@ SOURCES += \
     settings/compatfetcher.cpp \
     settings/mappingfetcher.cpp \
     settings/streamingpreferences.cpp \
-    streaming/cemuhook.cpp \
     streaming/input/abstouch.cpp \
     streaming/input/gamepad.cpp \
     streaming/input/input.cpp \
@@ -168,7 +167,8 @@ SOURCES += \
     gui/sdlgamepadkeynavigation.cpp \
     streaming/video/overlaymanager.cpp \
     backend/systemproperties.cpp \
-    wm.cpp
+    wm.cpp \
+    streaming/cemuhook.cpp
 
 HEADERS += \
     backend/nvaddress.h \
@@ -176,7 +176,6 @@ HEADERS += \
     cli/pair.h \
     settings/compatfetcher.h \
     settings/mappingfetcher.h \
-    streaming/cemuhook.h \
     utils.h \
     backend/computerseeker.h \
     backend/identitymanager.h \
@@ -204,7 +203,8 @@ HEADERS += \
     settings/mappingmanager.h \
     gui/sdlgamepadkeynavigation.h \
     streaming/video/overlaymanager.h \
-    backend/systemproperties.h
+    backend/systemproperties.h \
+    streaming/cemuhook.h
 
 # Platform-specific renderers and decoders
 ffmpeg {

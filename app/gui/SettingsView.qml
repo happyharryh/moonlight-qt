@@ -1227,6 +1227,17 @@ Flickable {
                     ToolTip.visible: hovered
                     ToolTip.text: qsTr("Allows Moonlight to capture gamepad inputs even if it's not the current window in focus")
                 }
+
+                CheckBox {
+                    id: cemuhookServer
+                    width: parent.width
+                    text: qsTr("Enable CemuHook Server")
+                    font.pointSize: 12
+                    checked: StreamingPreferences.cemuhookServer
+                    onCheckedChanged: {
+                        StreamingPreferences.cemuhookServer = checked
+                    }
+                }
             }
         }
 

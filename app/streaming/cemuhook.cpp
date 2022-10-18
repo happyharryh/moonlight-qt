@@ -14,7 +14,7 @@ const QMap<SDL_JoystickPowerLevel, SharedResponse::Battery> SharedResponse::batt
 
 void Server::init(const QHostAddress& addr, uint16_t port, QObject *parent) {
     if (server)
-        return;
+        destroy();
 
     server = new Server(parent);
     server->bind(addr, port);
@@ -27,6 +27,21 @@ void Server::init(const QHostAddress& addr, uint16_t port, QObject *parent) {
     thread->start();
 
     qInfo("[CemuHook Server] Initialized successfully.");
+}
+
+void Server::destroy() {
+    if (!server)
+        return;
+
+    thread->quit();
+    thread->wait();
+    delete thread;
+    thread = nullptr;
+
+    delete server;
+    server = nullptr;
+
+    qInfo("[CemuHook Server] Destroyed successfully.");
 }
 
 void Server::send(SDL_ControllerSensorEvent* event, GamepadState* state) {
@@ -48,6 +63,11 @@ Server::Server(QObject *parent) : QUdpSocket(parent),
     qRegisterMetaType<SDL_ControllerSensorEvent>("SDL_ControllerSensorEvent");
     qRegisterMetaType<GamepadState>("GamepadState");
     connect(this, &Server::sendSignal, this, &Server::handleSend);
+}
+
+Server::~Server() {
+    disconnect(this, &Server::readyRead, this, &Server::handleReceive);
+    disconnect(this, &Server::sendSignal, this, &Server::handleSend);
 }
 
 void Server::handleReceive() {

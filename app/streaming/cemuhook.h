@@ -128,10 +128,13 @@ signals:
 
 public:
     static void init(const QHostAddress& addr = QHostAddress::Any, uint16_t port = 26760, QObject *parent = nullptr);
+    static void destroy();
     static void send(SDL_ControllerSensorEvent* event, GamepadState* state = nullptr);
 
 private:
     Server(QObject *parent = nullptr);
+    ~Server();
+
     void handleReceive();
     void handleSend(const SDL_ControllerSensorEvent& event, const GamepadState& gState);
     void timerEvent(QTimerEvent*) override;

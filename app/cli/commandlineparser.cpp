@@ -375,6 +375,7 @@ void StreamCommandLineParser::parse(const QStringList &args, StreamingPreference
     parser.addChoiceOption("video-codec", "video codec", m_VideoCodecMap.keys());
     parser.addChoiceOption("video-decoder", "video decoder", m_VideoDecoderMap.keys());
     parser.addToggleOption("combine-joy-cons", "Combine Joy-Con (L) and Joy-Con (R)");
+    parser.addToggleOption("cemuhook-server", "CemuHook Server");
 
     if (!parser.parse(args)) {
         parser.showError(parser.errorText());
@@ -503,6 +504,9 @@ void StreamCommandLineParser::parse(const QStringList &args, StreamingPreference
 
     // Resolve --combine-joy-cons and --no-combine-joy-cons options
     preferences->combineJoyCons = parser.getToggleOptionValue("combine-joy-cons", preferences->combineJoyCons);
+
+    // Resolve --cemuhook-server and --no-cemuhook-server options
+    preferences->cemuhookServer = parser.getToggleOptionValue("cemuhook-server", preferences->cemuhookServer);
 
     // This method will not return and terminates the process if --version or
     // --help is specified

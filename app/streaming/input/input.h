@@ -195,5 +195,7 @@ private:
     char m_DragButton;
     int m_NumFingersDown;
 
+    bool m_CemuhookServer;
+
     static const int k_ButtonMap[];
 };

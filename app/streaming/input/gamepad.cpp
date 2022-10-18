@@ -467,11 +467,13 @@ void SdlInputHandler::handleControllerDeviceEvent(SDL_ControllerDeviceEvent* eve
             SDL_assert(m_GamepadMask == 0x1);
         }
 
-        if (SDL_GameControllerHasSensor(state->controller, SDL_SENSOR_ACCEL)) {
-            SDL_GameControllerSetSensorEnabled(state->controller, SDL_SENSOR_ACCEL, SDL_TRUE);
-        }
-        if (SDL_GameControllerHasSensor(state->controller, SDL_SENSOR_GYRO)) {
-            SDL_GameControllerSetSensorEnabled(state->controller, SDL_SENSOR_GYRO, SDL_TRUE);
+        if (m_CemuhookServer) {
+            if (SDL_GameControllerHasSensor(state->controller, SDL_SENSOR_ACCEL)) {
+                SDL_GameControllerSetSensorEnabled(state->controller, SDL_SENSOR_ACCEL, SDL_TRUE);
+            }
+            if (SDL_GameControllerHasSensor(state->controller, SDL_SENSOR_GYRO)) {
+                SDL_GameControllerSetSensorEnabled(state->controller, SDL_SENSOR_GYRO, SDL_TRUE);
+            }
         }
 
         // Send an empty event to tell the PC we've arrived

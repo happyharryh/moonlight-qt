@@ -1251,6 +1251,17 @@ Flickable {
                     ToolTip.visible: hovered
                     ToolTip.text: qsTr("Combine Joy-Con (L) and Joy-Con (R)")
                 }
+
+                CheckBox {
+                    id: cemuhookServer
+                    width: parent.width
+                    text: qsTr("Enable CemuHook Server")
+                    font.pointSize: 12
+                    checked: StreamingPreferences.cemuhookServer
+                    onCheckedChanged: {
+                        StreamingPreferences.cemuhookServer = checked
+                    }
+                }
             }
         }
 

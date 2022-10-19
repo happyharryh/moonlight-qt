@@ -46,6 +46,7 @@
 #define SER_LANGUAGE "language"
 #define SER_COMBINEJOYCONS "combinejoycons"
 #define SER_CEMUHOOKSERVER "cemuhookserver"
+#define SER_VBANEMITTER "vbanemitter"
 
 #define CURRENT_DEFAULT_VER 2
 
@@ -125,6 +126,7 @@ void StreamingPreferences::reload()
                                                     static_cast<int>(Language::LANG_AUTO)).toInt());
     combineJoyCons = settings.value(SER_COMBINEJOYCONS, true).toBool();
     cemuhookServer = settings.value(SER_CEMUHOOKSERVER, false).toBool();
+    vbanEmitter = settings.value(SER_VBANEMITTER, false).toBool();
 
 
     // Perform default settings updates as required based on last default version
@@ -292,6 +294,7 @@ void StreamingPreferences::save()
     settings.setValue(SER_KEEPAWAKE, keepAwake);
     settings.setValue(SER_COMBINEJOYCONS, combineJoyCons);
     settings.setValue(SER_CEMUHOOKSERVER, cemuhookServer);
+    settings.setValue(SER_VBANEMITTER, vbanEmitter);
 }
 
 int StreamingPreferences::getDefaultBitrate(int width, int height, int fps)

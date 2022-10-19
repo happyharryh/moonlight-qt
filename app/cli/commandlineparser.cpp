@@ -376,6 +376,7 @@ void StreamCommandLineParser::parse(const QStringList &args, StreamingPreference
     parser.addChoiceOption("video-decoder", "video decoder", m_VideoDecoderMap.keys());
     parser.addToggleOption("combine-joy-cons", "Combine Joy-Con (L) and Joy-Con (R)");
     parser.addToggleOption("cemuhook-server", "CemuHook Server");
+    parser.addToggleOption("vban-emitter", "VBAN Emitter");
 
     if (!parser.parse(args)) {
         parser.showError(parser.errorText());
@@ -507,6 +508,9 @@ void StreamCommandLineParser::parse(const QStringList &args, StreamingPreference
 
     // Resolve --cemuhook-server and --no-cemuhook-server options
     preferences->cemuhookServer = parser.getToggleOptionValue("cemuhook-server", preferences->cemuhookServer);
+
+    // Resolve --vban-emitter and --no-vban-emitter options
+    preferences->vbanEmitter = parser.getToggleOptionValue("vban-emitter", preferences->vbanEmitter);
 
     // This method will not return and terminates the process if --version or
     // --help is specified

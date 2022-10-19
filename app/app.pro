@@ -168,7 +168,8 @@ SOURCES += \
     streaming/video/overlaymanager.cpp \
     backend/systemproperties.cpp \
     wm.cpp \
-    streaming/cemuhook.cpp
+    streaming/cemuhook.cpp \
+    streaming/vban.cpp
 
 HEADERS += \
     backend/nvaddress.h \
@@ -204,7 +205,8 @@ HEADERS += \
     gui/sdlgamepadkeynavigation.h \
     streaming/video/overlaymanager.h \
     backend/systemproperties.h \
-    streaming/cemuhook.h
+    streaming/cemuhook.h \
+    streaming/vban.h
 
 # Platform-specific renderers and decoders
 ffmpeg {

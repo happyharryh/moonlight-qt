@@ -2,6 +2,7 @@
 #include "settings/streamingpreferences.h"
 #include "streaming/streamutils.h"
 #include "backend/richpresencemanager.h"
+#include "streaming/vban.h"
 
 #include <Limelight.h>
 #include <SDL.h>
@@ -631,6 +632,10 @@ bool Session::initialize()
     if (!ret) {
         SDL_QuitSubSystem(SDL_INIT_VIDEO);
         return false;
+    }
+
+    if (m_Preferences->vbanEmitter) {
+        Vban::Emitter::init(QHostAddress(m_Computer->activeAddress.address()));
     }
 
     return true;
@@ -1829,6 +1834,8 @@ DispatchDeferredCleanup:
     }
 
     SDL_QuitSubSystem(SDL_INIT_VIDEO);
+
+    Vban::Emitter::destroy();
 
     // Cleanup can take a while, so dispatch it to a worker thread.
     // When it is complete, it will release our s_ActiveSessionSemaphore

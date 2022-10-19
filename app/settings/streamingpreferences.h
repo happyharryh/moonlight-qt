@@ -134,7 +134,8 @@ public:
     Q_PROPERTY(CaptureSysKeysMode captureSysKeysMode MEMBER captureSysKeysMode NOTIFY captureSysKeysModeChanged)
     Q_PROPERTY(Language language MEMBER language NOTIFY languageChanged)
     Q_PROPERTY(bool combineJoyCons MEMBER combineJoyCons NOTIFY combineJoyConsChanged)
-    Q_PROPERTY(bool cemuhookServer MEMBER cemuhookServer NOTIFY cemuhookServerChanged);
+    Q_PROPERTY(bool cemuhookServer MEMBER cemuhookServer NOTIFY cemuhookServerChanged)
+    Q_PROPERTY(bool vbanEmitter MEMBER vbanEmitter NOTIFY vbanEmitterChanged);
 
     Q_INVOKABLE bool retranslate();
 
@@ -174,6 +175,7 @@ public:
     CaptureSysKeysMode captureSysKeysMode;
     bool combineJoyCons;
     bool cemuhookServer;
+    bool vbanEmitter;
 
 signals:
     void displayModeChanged();
@@ -207,6 +209,7 @@ signals:
     void languageChanged();
     void combineJoyConsChanged();
     void cemuhookServerChanged();
+    void vbanEmitterChanged();
 
 private:
     QString getSuffixFromLanguage(Language lang);

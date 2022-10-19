@@ -1227,6 +1227,17 @@ Flickable {
                     ToolTip.visible: hovered
                     ToolTip.text: qsTr("Allows Moonlight to capture gamepad inputs even if it's not the current window in focus")
                 }
+
+                CheckBox {
+                    id: vbanEmitter
+                    width: parent.width
+                    text: qsTr("Enable VBAN Emitter")
+                    font.pointSize: 12
+                    checked: StreamingPreferences.vbanEmitter
+                    onCheckedChanged: {
+                        StreamingPreferences.vbanEmitter = checked
+                    }
+                }
             }
         }
 

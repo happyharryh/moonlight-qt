@@ -9,17 +9,17 @@
 namespace Cemuhook {
 
 struct Header {
-    char magic[4]; // DSUS - server, DSUC - client
-    uint16_t version; // 1001
-    uint16_t length; // without header
-    uint32_t crc32; // whole packet with this field = 0
-    uint32_t id; // of packet source, constant among one run
+    char magic[4];
+    uint16_t version;
+    uint16_t length;
+    uint32_t crc32;
+    uint32_t id;
 
     enum class EventType : uint32_t {
-        VERSION_TYPE = 0x100000,  // protocol version information
-        INFO_TYPE = 0x100001,  // information about connected controllers
-        DATA_TYPE = 0x100002,  // actual controllers data
-    } eventType; // no part of the header where length is involved
+        VERSION_TYPE = 0x100000,
+        INFO_TYPE = 0x100001,
+        DATA_TYPE = 0x100002
+    } eventType;
 };
 
 union Request {
@@ -27,7 +27,7 @@ union Request {
 
     struct InfoRequest {
         Header header;
-        int32_t portCnt; // amount of ports to report
+        int32_t slotNumber;
         uint8_t slot[4];
     } info;
 
@@ -64,7 +64,7 @@ struct SharedResponse {
         FOR_INFO, CONNECTED
     } connected;
 
-    static const QMap<SDL_JoystickPowerLevel, Battery> batteryMap;
+    static const QMap<SDL_JoystickPowerLevel, Battery> k_BatteryMap;
 };
 
 struct VersionResponse {
@@ -74,12 +74,12 @@ struct VersionResponse {
 
 struct InfoResponse {
     Header header;
-    SharedResponse response;
+    SharedResponse shared;
 };
 
 struct DataResponse {
     Header header;
-    SharedResponse response;
+    SharedResponse shared;
     uint32_t packetNumber;
     uint16_t buttons;
     uint8_t homeButton;
@@ -123,47 +123,55 @@ struct DataResponse {
 class Server : public QUdpSocket {
     Q_OBJECT
 
-signals:
-    void sendSignal(const SDL_ControllerSensorEvent& event, const GamepadState& gState);
-
 public:
-    static void init(const QHostAddress& addr = QHostAddress::Any, uint16_t port = 26760, QObject *parent = nullptr);
-    static void destroy();
-    static void send(SDL_ControllerSensorEvent* event, GamepadState* state = nullptr);
+    static
+    void init(const QHostAddress& addr = QHostAddress::Any, uint16_t port = 26760, QObject *parent = nullptr);
+
+    static
+    void destroy();
+
+    static
+    void send(SDL_ControllerSensorEvent* event, GamepadState* state = nullptr);
+
+signals:
+    void sendSignal(const SDL_ControllerSensorEvent& event, const GamepadState& state);
 
 private:
-    Server(QObject *parent = nullptr);
+    explicit Server(QObject *parent = nullptr);
+
     ~Server();
 
     void handleReceive();
-    void handleSend(const SDL_ControllerSensorEvent& event, const GamepadState& gState);
+
+    void handleSend(const SDL_ControllerSensorEvent& event, const GamepadState& state);
+
     void timerEvent(QTimerEvent*) override;
 
-    uint32_t serverId;
+    uint32_t m_ServerId;
 
     struct Client {
         uint32_t id;
         QHostAddress address;
         uint16_t port;
-        uint32_t packet;
+        uint32_t packetNumber;
         uint32_t lastTimestamp;
     };
-    QList<Client> clients;
+    QList<Client> m_Clients;
 
-    struct JoystickState {
-        DataResponse::MotionData tmpMotionData[3];
+    struct Sensor {
+        DataResponse::MotionData motionData[3];
         uint32_t inputTimestamp = 0;
-        size_t tmpAccelIdx = 0;
-        size_t tmpGyroIdx = 0;
+        size_t accelIndex = 0;
+        size_t gyroIndex = 0;
 
         uint64_t outputTimestamp = 0;
         uint64_t outputInterval = 5000;
         uint32_t sampleTimestamp = 0;
         uint32_t sampleCount = 0;
-    } jStates[MAX_GAMEPADS];
+    } m_Sensors[MAX_GAMEPADS];
 
-    static Server* server;
-    static QThread* thread;
+    static Server* s_Server;
+    static QThread* s_Thread;
 };
 
 }

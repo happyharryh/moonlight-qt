@@ -2,7 +2,7 @@
 
 namespace Cemuhook {
 
-const QMap<SDL_JoystickPowerLevel, SharedResponse::Battery> SharedResponse::batteryMap = {
+const QMap<SDL_JoystickPowerLevel, SharedResponse::Battery> SharedResponse::k_BatteryMap = {
     {SDL_JOYSTICK_POWER_UNKNOWN, Battery::NOT_APPLICABLE},
     {SDL_JOYSTICK_POWER_EMPTY, Battery::DYING},
     {SDL_JOYSTICK_POWER_LOW, Battery::LOW},
@@ -13,51 +13,51 @@ const QMap<SDL_JoystickPowerLevel, SharedResponse::Battery> SharedResponse::batt
 };
 
 void Server::init(const QHostAddress& addr, uint16_t port, QObject *parent) {
-    if (server)
+    if (s_Server)
         destroy();
 
-    server = new Server(parent);
-    server->bind(addr, port);
+    s_Server = new Server(parent);
+    s_Server->bind(addr, port);
 
     constexpr int CHECK_INTERVAL = 3000;
-    server->startTimer(CHECK_INTERVAL);
+    s_Server->startTimer(CHECK_INTERVAL);
 
-    thread = new QThread();
-    server->moveToThread(thread);
-    thread->start();
+    s_Thread = new QThread();
+    s_Server->moveToThread(s_Thread);
+    s_Thread->start();
 
     qInfo("[CemuHook Server] Initialized successfully.");
 }
 
 void Server::destroy() {
-    if (!server)
+    if (!s_Server)
         return;
 
-    thread->quit();
-    thread->wait();
-    delete thread;
-    thread = nullptr;
+    s_Thread->quit();
+    s_Thread->wait();
+    delete s_Thread;
+    s_Thread = nullptr;
 
-    delete server;
-    server = nullptr;
+    delete s_Server;
+    s_Server = nullptr;
 
     qInfo("[CemuHook Server] Destroyed successfully.");
 }
 
 void Server::send(SDL_ControllerSensorEvent* event, GamepadState* state) {
-    if (!server)
+    if (!s_Server)
         init();
 
     if (state) {
-        emit server->sendSignal(*event, *state);
+        emit s_Server->sendSignal(*event, *state);
     } else {
         static const GamepadState nullState {};
-        emit server->sendSignal(*event, nullState);
+        emit s_Server->sendSignal(*event, nullState);
     }
 }
 
 Server::Server(QObject *parent) : QUdpSocket(parent),
-    serverId(IdentityManager::get()->getUniqueId().toULongLong(nullptr, 16)) {
+    m_ServerId(IdentityManager::get()->getUniqueId().toULongLong(nullptr, 16)) {
     connect(this, &Server::readyRead, this, &Server::handleReceive);
 
     qRegisterMetaType<SDL_ControllerSensorEvent>("SDL_ControllerSensorEvent");
@@ -71,51 +71,51 @@ Server::~Server() {
 }
 
 void Server::handleReceive() {
-    static Request req;
+    static Request request;
     static QHostAddress inAddress;
     static uint16_t inPort;
-    if (readDatagram(reinterpret_cast<char *>(&req), sizeof(req), &inAddress, &inPort) < sizeof(Header))
+    if (readDatagram(reinterpret_cast<char *>(&request), sizeof(request), &inAddress, &inPort) < sizeof(Header))
         return;
 
-    if (strncmp(req.header.magic, "DSUC", 4) || req.header.version != VERSION)
+    if (strncmp(request.header.magic, "DSUC", 4) || request.header.version != VERSION)
         return;
 
-    uint32_t inCrc = req.header.crc32;
-    req.header.crc32 = 0;
-    if (SDL_crc32(0, &req, req.header.length + 16) != inCrc)
+    uint32_t inCrc32 = request.header.crc32;
+    request.header.crc32 = 0;
+    if (SDL_crc32(0, &request, request.header.length + 16) != inCrc32)
         return;
 
-    switch (req.header.eventType) {
+    switch (request.header.eventType) {
         case Header::EventType::VERSION_TYPE: {
-            static VersionResponse res = {
+            static VersionResponse response = {
                 {                                       // header
                     {'D', 'S', 'U', 'S'},                   // magic
                     VERSION,                                // version
                     sizeof(VersionResponse) - 16,           // length
                     0,                                      // crc32
-                    serverId,                               // id
+                    m_ServerId,                             // id
                     Header::EventType::VERSION_TYPE         // eventType
                 },
                 VERSION                                 // version
             };
 
-            res.header.crc32 = 0;
-            res.header.crc32 = SDL_crc32(0, &res, sizeof(res));
-            writeDatagram(reinterpret_cast<char *>(&res), sizeof(res), inAddress, inPort);
+            response.header.crc32 = 0;
+            response.header.crc32 = SDL_crc32(0, &response, sizeof(response));
+            writeDatagram(reinterpret_cast<char *>(&response), sizeof(response), inAddress, inPort);
             break;
         }
 
         case Header::EventType::INFO_TYPE: {
-            static InfoResponse res {
+            static InfoResponse response {
                 {                                                   // header
                     {'D', 'S', 'U', 'S'},                               // magic
                     VERSION,                                            // version
                     sizeof(InfoResponse) - 16,                          // length
                     0,                                                  // crc32
-                    serverId,                                           // id
+                    m_ServerId,                                         // id
                     Header::EventType::INFO_TYPE                        // eventType
                 },
-                {                                                   // response
+                {                                                   // shared
                     0,                                                  // slot
                     SharedResponse::SlotState::NOT_CONNECTED,           // slotState
                     SharedResponse::DeviceModel::NOT_APPLICABLE,        // deviceModel
@@ -126,43 +126,43 @@ void Server::handleReceive() {
                 }
             };
 
-            for (size_t i = 0; i < req.info.portCnt; ++i) {
-                uint8_t slot = req.info.slot[i];
+            for (size_t i = 0; i < request.info.slotNumber; ++i) {
+                uint8_t slot = request.info.slot[i];
                 if (slot >= MAX_GAMEPADS)
                     continue;
 
-                res.response.slot = slot;
+                response.shared.slot = slot;
                 if (SDL_Joystick* joystick = SDL_JoystickFromPlayerIndex(slot)) {
-                    res.response.slotState = SharedResponse::SlotState::CONNECTED;
+                    response.shared.slotState = SharedResponse::SlotState::CONNECTED;
 
                     SDL_GameController* gameController = SDL_GameControllerFromInstanceID(
                         SDL_JoystickInstanceID(joystick));
                     if (SDL_GameControllerIsSensorEnabled(gameController, SDL_SENSOR_ACCEL) &&
                         SDL_GameControllerIsSensorEnabled(gameController, SDL_SENSOR_GYRO)) {
-                        res.response.deviceModel = SharedResponse::DeviceModel::FULL_GYRO;
+                        response.shared.deviceModel = SharedResponse::DeviceModel::FULL_GYRO;
                     } else {
-                        res.response.deviceModel = SharedResponse::DeviceModel::DO_NOT_USE;
+                        response.shared.deviceModel = SharedResponse::DeviceModel::DO_NOT_USE;
                     }
 
                     if (const char* serial = SDL_JoystickGetSerial(joystick)) {
                         sscanf_s(serial, "%hhx-%hhx-%hhx-%hhx-%hhx-%hhx",
-                                 &res.response.mac[0], &res.response.mac[1], &res.response.mac[2],
-                                 &res.response.mac[3], &res.response.mac[4], &res.response.mac[5]);
+                                 &response.shared.mac[0], &response.shared.mac[1], &response.shared.mac[2],
+                                 &response.shared.mac[3], &response.shared.mac[4], &response.shared.mac[5]);
                     } else {
-                        memset(res.response.mac, 0, sizeof(res.response.mac));
+                        memset(response.shared.mac, 0, sizeof(response.shared.mac));
                     }
 
-                    res.response.battery = SharedResponse::batteryMap[SDL_JoystickCurrentPowerLevel(joystick)];
+                    response.shared.battery = SharedResponse::k_BatteryMap[SDL_JoystickCurrentPowerLevel(joystick)];
                 } else {
-                    res.response.slotState = SharedResponse::SlotState::NOT_CONNECTED;
-                    res.response.deviceModel = SharedResponse::DeviceModel::NOT_APPLICABLE;
-                    memset(res.response.mac, 0, sizeof(res.response.mac));
-                    res.response.battery = SharedResponse::Battery::NOT_APPLICABLE;
+                    response.shared.slotState = SharedResponse::SlotState::NOT_CONNECTED;
+                    response.shared.deviceModel = SharedResponse::DeviceModel::NOT_APPLICABLE;
+                    memset(response.shared.mac, 0, sizeof(response.shared.mac));
+                    response.shared.battery = SharedResponse::Battery::NOT_APPLICABLE;
                 }
 
-                res.header.crc32 = 0;
-                res.header.crc32 = SDL_crc32(0, &res, sizeof(res));
-                writeDatagram(reinterpret_cast<char *>(&res), sizeof(res), inAddress, inPort);
+                response.header.crc32 = 0;
+                response.header.crc32 = SDL_crc32(0, &response, sizeof(response));
+                writeDatagram(reinterpret_cast<char *>(&response), sizeof(response), inAddress, inPort);
             }
             break;
         }
@@ -170,14 +170,14 @@ void Server::handleReceive() {
         case Header::EventType::DATA_TYPE: {
             uint32_t curTimestamp = SDL_GetTicks();
             bool isNewClient = true;
-            for (Client& client : clients) {
+            for (Client& client : m_Clients) {
                 if (client.address == inAddress && client.port == inPort) {
                     client.lastTimestamp = curTimestamp;
                     isNewClient = false;
                 }
             }
             if (isNewClient) {
-                clients.append(Client {req.header.id, inAddress, inPort, 0, curTimestamp});
+                m_Clients.append(Client {request.header.id, inAddress, inPort, 0, curTimestamp});
 
                 qInfo("[CemuHook Server] Request for data from new client [%s:%d].",
                       qPrintable(inAddress.toString()), inPort);
@@ -187,8 +187,8 @@ void Server::handleReceive() {
     }
 }
 
-void Server::handleSend(const SDL_ControllerSensorEvent& event, const GamepadState& gState) {
-    if (clients.isEmpty()) {
+void Server::handleSend(const SDL_ControllerSensorEvent& event, const GamepadState& state) {
+    if (m_Clients.isEmpty()) {
         return;
     }
 
@@ -197,62 +197,77 @@ void Server::handleSend(const SDL_ControllerSensorEvent& event, const GamepadSta
     if (slot >= MAX_GAMEPADS)
         return;
 
-    JoystickState* jState = &jStates[slot];
-    if (event.timestamp != jState->inputTimestamp) {
-        jState->tmpAccelIdx = 0;
-        jState->tmpGyroIdx = 0;
-        jState->inputTimestamp = event.timestamp;
+    /*
+        In SDL 2.24.0, the order of the sensor events may be:
+            T1_gyro, T2_gyro, T3_gyro, T1_accel, T2_accel, T3_accel, ...
+            (See https://github.com/libsdl-org/SDL/blob/release-2.24.0/src/joystick/hidapi/SDL_hidapi_switch.c#L1999)
+        The below codes are going to change the order to what we need:
+            (T1_accel, T1_gyro), (T2_accel, T2_gyro), (T3_accel, T3_gyro), ...
+        In the future version of SDL, the order of the sensor events will become:
+            T1_gyro, T1_accel, T2_gyro, T2_accel, T3_gyro, T3_accel, ...
+            (See PR: https://github.com/libsdl-org/SDL/pull/6373)
+        After that, the codes here can be simplified.
+    */
+    Sensor* sensor = &m_Sensors[slot];
+    if (event.timestamp != sensor->inputTimestamp) {
+        sensor->accelIndex = 0;
+        sensor->gyroIndex = 0;
+        sensor->inputTimestamp = event.timestamp;
     }
 
     DataResponse::MotionData* motion = nullptr;
     if (event.sensor == SDL_SENSOR_ACCEL) {
-        DataResponse::MotionData* _motion = &jState->tmpMotionData[jState->tmpAccelIdx % 3];
+        DataResponse::MotionData* _motion = &sensor->motionData[sensor->accelIndex % 3];
         constexpr float GRAVITY = 9.80665f;
         _motion->accX = - event.data[0] / GRAVITY;
         _motion->accY = - event.data[1] / GRAVITY;
         _motion->accZ = - event.data[2] / GRAVITY;
-        if (++jState->tmpAccelIdx <= jState->tmpGyroIdx)
+        if (++sensor->accelIndex <= sensor->gyroIndex)
             motion = _motion;
     } else if (event.sensor == SDL_SENSOR_GYRO) {
-        DataResponse::MotionData* _motion = &jState->tmpMotionData[jState->tmpGyroIdx % 3];
+        DataResponse::MotionData* _motion = &sensor->motionData[sensor->gyroIndex % 3];
         constexpr float PI = 3.1415926535f / 312.0f;
         _motion->pitch = event.data[0] / (PI * 2);
         _motion->yaw = - event.data[1] / (PI * 2);
         _motion->roll = - event.data[2] / (PI * 2);
-        if (++jState->tmpGyroIdx <= jState->tmpAccelIdx)
+        if (++sensor->gyroIndex <= sensor->accelIndex)
             motion = _motion;
     } else {
         return;
     }
 
     if (motion) {
-        if (jState->sampleTimestamp == 0)
-            jState->sampleTimestamp = SDL_GetTicks();
+        /*
+            The codes here impliment the feature of this commit in advance:
+            https://github.com/libsdl-org/SDL/commit/18eb319adcba169c73bff27a13abe8a7ea08b0ff
+        */
+        if (sensor->sampleTimestamp == 0)
+            sensor->sampleTimestamp = SDL_GetTicks();
 
         constexpr uint32_t SAMPLE_FREQUENCY = 1000;
-        if (++jState->sampleCount >= SAMPLE_FREQUENCY) {
+        if (++sensor->sampleCount >= SAMPLE_FREQUENCY) {
             uint32_t now = SDL_GetTicks();
-            jState->outputInterval = (now - jState->sampleTimestamp) * 1000 / jState->sampleCount;
-            jState->sampleCount = 0;
-            jState->sampleTimestamp = now;
+            sensor->outputInterval = (now - sensor->sampleTimestamp) * 1000 / sensor->sampleCount;
+            sensor->sampleCount = 0;
+            sensor->sampleTimestamp = now;
         }
 
-        jState->outputTimestamp += jState->outputInterval;
-        reinterpret_cast<uint64_t &>(motion->timestamp) = jState->outputTimestamp;
+        sensor->outputTimestamp += sensor->outputInterval;
+        reinterpret_cast<uint64_t &>(motion->timestamp) = sensor->outputTimestamp;
     } else {
         return;
     }
 
-    static DataResponse res {
+    static DataResponse response {
         {                                                   // header
             {'D', 'S', 'U', 'S'},                               // magic
             VERSION,                                            // version
             sizeof(DataResponse) - 16,                          // length
             0,                                                  // crc32
-            serverId,                                           // id
+            m_ServerId,                                         // id
             Header::EventType::DATA_TYPE                        // eventType
         },
-        {                                                   // response
+        {                                                   // shared
             0,                                                  // slot
             SharedResponse::SlotState::CONNECTED,               // slotState
             SharedResponse::DeviceModel::FULL_GYRO,             // deviceModel
@@ -263,87 +278,87 @@ void Server::handleSend(const SDL_ControllerSensorEvent& event, const GamepadSta
         }
     };
 
-    res.response.slot = slot;
+    response.shared.slot = slot;
 
     if (const char* serial = SDL_JoystickGetSerial(joystick)) {
         sscanf_s(serial, "%hhx-%hhx-%hhx-%hhx-%hhx-%hhx",
-                 &res.response.mac[0], &res.response.mac[1], &res.response.mac[2],
-                 &res.response.mac[3], &res.response.mac[4], &res.response.mac[5]);
+                 &response.shared.mac[0], &response.shared.mac[1], &response.shared.mac[2],
+                 &response.shared.mac[3], &response.shared.mac[4], &response.shared.mac[5]);
     } else {
-        memset(res.response.mac, 0, sizeof(res.response.mac));
+        memset(response.shared.mac, 0, sizeof(response.shared.mac));
     }
 
-    res.response.battery = SharedResponse::batteryMap[SDL_JoystickCurrentPowerLevel(joystick)];
+    response.shared.battery = SharedResponse::k_BatteryMap[SDL_JoystickCurrentPowerLevel(joystick)];
 
-    memcpy(&res.motion, motion, sizeof(res.motion));
+    memcpy(&response.motion, motion, sizeof(response.motion));
 
-    if (gState.controller) {
-        res.buttons = (gState.buttons & BACK_FLAG ? 0x1 : 0) |
-                      (gState.buttons & LS_CLK_FLAG ? 0x2 : 0) |
-                      (gState.buttons & RS_CLK_FLAG ? 0x4 : 0) |
-                      (gState.buttons & PLAY_FLAG ? 0x8 : 0) |
-                      (gState.buttons & UP_FLAG ? 0x10 : 0) |
-                      (gState.buttons & RIGHT_FLAG ? 0x20 : 0) |
-                      (gState.buttons & DOWN_FLAG ? 0x40 : 0) |
-                      (gState.buttons & LEFT_FLAG ? 0x80 : 0) |
-                      (gState.lt > 0 ? 0x100 : 0) |
-                      (gState.rt > 0 ? 0x200 : 0) |
-                      (gState.buttons & LB_FLAG ? 0x400 : 0) |
-                      (gState.buttons & RB_FLAG ? 0x800 : 0) |
-                      (gState.buttons & X_FLAG ? 0x1000 : 0) |
-                      (gState.buttons & A_FLAG ? 0x2000 : 0) |
-                      (gState.buttons & B_FLAG ? 0x4000 : 0) |
-                      (gState.buttons & Y_FLAG ? 0x8000 : 0);
-        res.homeButton = gState.buttons & SPECIAL_FLAG ? 1 : 0;
-        res.lsX = (gState.lsX >> 8) + 0x80;
-        res.lsY = (gState.lsY >> 8) + 0x80;
-        res.rsX = (gState.rsX >> 8) + 0x80;
-        res.rsY = (gState.rsY >> 8) + 0x80;
-        res.adLeft = gState.buttons & LEFT_FLAG ? 0xFF : 0;
-        res.adDown = gState.buttons & DOWN_FLAG ? 0xFF : 0;
-        res.adRight = gState.buttons & RIGHT_FLAG ? 0xFF : 0;
-        res.adUp = gState.buttons & UP_FLAG ? 0xFF : 0;
-        res.aY = gState.buttons & Y_FLAG ? 0xFF : 0;
-        res.aB = gState.buttons & B_FLAG ? 0xFF : 0;
-        res.aA = gState.buttons & A_FLAG ? 0xFF : 0;
-        res.aX = gState.buttons & X_FLAG ? 0xFF : 0;
-        res.aR1 = gState.buttons & RB_FLAG ? 0xFF : 0;
-        res.aL1 = gState.buttons & LB_FLAG ? 0xFF : 0;
-        res.aR2 = gState.rt;
-        res.aL2 = gState.lt;
+    if (state.controller) {
+        response.buttons = (state.buttons & BACK_FLAG ? 0x1 : 0) |
+                           (state.buttons & LS_CLK_FLAG ? 0x2 : 0) |
+                           (state.buttons & RS_CLK_FLAG ? 0x4 : 0) |
+                           (state.buttons & PLAY_FLAG ? 0x8 : 0) |
+                           (state.buttons & UP_FLAG ? 0x10 : 0) |
+                           (state.buttons & RIGHT_FLAG ? 0x20 : 0) |
+                           (state.buttons & DOWN_FLAG ? 0x40 : 0) |
+                           (state.buttons & LEFT_FLAG ? 0x80 : 0) |
+                           (state.lt > 0 ? 0x100 : 0) |
+                           (state.rt > 0 ? 0x200 : 0) |
+                           (state.buttons & LB_FLAG ? 0x400 : 0) |
+                           (state.buttons & RB_FLAG ? 0x800 : 0) |
+                           (state.buttons & X_FLAG ? 0x1000 : 0) |
+                           (state.buttons & A_FLAG ? 0x2000 : 0) |
+                           (state.buttons & B_FLAG ? 0x4000 : 0) |
+                           (state.buttons & Y_FLAG ? 0x8000 : 0);
+        response.homeButton = state.buttons & SPECIAL_FLAG ? 1 : 0;
+        response.lsX = (state.lsX >> 8) + 0x80;
+        response.lsY = (state.lsY >> 8) + 0x80;
+        response.rsX = (state.rsX >> 8) + 0x80;
+        response.rsY = (state.rsY >> 8) + 0x80;
+        response.adLeft = state.buttons & LEFT_FLAG ? 0xFF : 0;
+        response.adDown = state.buttons & DOWN_FLAG ? 0xFF : 0;
+        response.adRight = state.buttons & RIGHT_FLAG ? 0xFF : 0;
+        response.adUp = state.buttons & UP_FLAG ? 0xFF : 0;
+        response.aY = state.buttons & Y_FLAG ? 0xFF : 0;
+        response.aB = state.buttons & B_FLAG ? 0xFF : 0;
+        response.aA = state.buttons & A_FLAG ? 0xFF : 0;
+        response.aX = state.buttons & X_FLAG ? 0xFF : 0;
+        response.aR1 = state.buttons & RB_FLAG ? 0xFF : 0;
+        response.aL1 = state.buttons & LB_FLAG ? 0xFF : 0;
+        response.aR2 = state.rt;
+        response.aL2 = state.lt;
     } else {
-        res.buttons = res.homeButton = 0;
-        res.lsX = res.lsY = res.rsX = res.rsY = 0x80;
-        res.adLeft = res.adDown = res.adRight = res.adUp = 0;
-        res.aY = res.aB = res.aA = res.aX = 0;
-        res.aR1 = res.aL1 = res.aR2 = res.aL2 = 0;
+        response.buttons = response.homeButton = 0;
+        response.lsX = response.lsY = response.rsX = response.rsY = 0x80;
+        response.adLeft = response.adDown = response.adRight = response.adUp = 0;
+        response.aY = response.aB = response.aA = response.aX = 0;
+        response.aR1 = response.aL1 = response.aR2 = response.aL2 = 0;
     }
 
-    for (Client& client : clients) {
-        res.packetNumber = client.packet++;
-        res.header.crc32 = 0;
-        res.header.crc32 = SDL_crc32(0, &res, sizeof(res));
-        writeDatagram(reinterpret_cast<char *>(&res), sizeof(res), client.address, client.port);
+    for (Client& client : m_Clients) {
+        response.packetNumber = client.packetNumber++;
+        response.header.crc32 = 0;
+        response.header.crc32 = SDL_crc32(0, &response, sizeof(response));
+        writeDatagram(reinterpret_cast<char *>(&response), sizeof(response), client.address, client.port);
     }
 }
 
 void Server::timerEvent(QTimerEvent*) {
     uint32_t curTimestamp = SDL_GetTicks();
 
-    for (QList<Client>::iterator c = clients.begin(); c != clients.end();) {
+    for (QList<Client>::iterator c = m_Clients.begin(); c != m_Clients.end();) {
         constexpr uint32_t CHECK_TIMEOUT = 5000;
         if (curTimestamp - c->lastTimestamp > CHECK_TIMEOUT) {
             qInfo("[CemuHook Server] No packet from client [%s:%d] for some time.",
                   qPrintable(c->address.toString()), c->port);
 
-            c = clients.erase(c);
+            c = m_Clients.erase(c);
         } else {
             ++c;
         }
     }
 }
 
-Server* Server::server = nullptr;
-QThread* Server::thread = nullptr;
+Server* Server::s_Server = nullptr;
+QThread* Server::s_Thread = nullptr;
 
 }

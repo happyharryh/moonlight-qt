@@ -10,6 +10,18 @@ You can follow development on our [Discord server](https://moonlight-stream.org/
  [![Downloads](https://img.shields.io/github/downloads/moonlight-stream/moonlight-qt/total)](https://github.com/moonlight-stream/moonlight-qt/releases)
  [![Translation Status](https://hosted.weblate.org/widgets/moonlight/-/moonlight-qt/svg-badge.svg)](https://hosted.weblate.org/projects/moonlight/moonlight-qt/)
 
+## Branch Features
+- Customize the combine mode of Nintendo Joy-Cons in the settings view
+- CemuHook Server: sending the sensor data of game controllers using [CemuHook Protocal](https://github.com/v1993/cemuhook-protocol)
+  - Set `ip_of_your_client_pc:26760` as a motion source in your Yuzu/Cemu
+  - Enjoy those games which require motion sensor
+  - Known Issue: In SDL 2.24.0, the sensor may be 30% more sensitive in some axises. This bug will be fixed in the future (See [PR](https://github.com/libsdl-org/SDL/pull/6394)).
+- VBAN Emitter: sending the microphone input using [VBAN Protocol](https://vb-audio.com/Voicemeeter/vban.htm)
+  - Install [Voicemeeter](https://vb-audio.com/Voicemeeter/index.htm) on your game PC
+  - Set the VBAN stream (Stream Name: `Moonlight`, IP Address: `ip_of_your_client_pc`, Port: `6980`) as an audio source in Voicemeeter
+  - Set `VoiceMeeter Output (VB-Audio VoiceMeeter VAIO)` as the default audio input of your Windows System
+  - Enjoy the voicechat in your game
+
 ## Features
  - Hardware accelerated video decoding on Windows, Mac, and Linux
  - Supports streaming at up to 120 FPS (high refresh rate monitor recommended)

@@ -10,6 +10,12 @@ You can follow development on our [Discord server](https://moonlight-stream.org/
  [![Downloads](https://img.shields.io/github/downloads/moonlight-stream/moonlight-qt/total)](https://github.com/moonlight-stream/moonlight-qt/releases)
  [![Translation Status](https://hosted.weblate.org/widgets/moonlight/-/moonlight-qt/svg-badge.svg)](https://hosted.weblate.org/projects/moonlight/moonlight-qt/)
 
+## Branch Features
+- CemuHook Server: sending the sensor data of game controllers using [CemuHook Protocal](https://github.com/v1993/cemuhook-protocol)
+  - Set "ip_of_your_client_pc:26760" as a motion source in your Yuzu/Cemu
+  - Enjoy those games which require motion sensor
+  - Known Issue: In SDL 2.24.0, the sensor may be 30% more sensitive in some axises. This bug will be fixed in the future (See [PR](https://github.com/libsdl-org/SDL/pull/6394)).
+
 ## Features
  - Hardware accelerated video decoding on Windows, Mac, and Linux
  - Supports streaming at up to 120 FPS (high refresh rate monitor recommended)

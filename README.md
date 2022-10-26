@@ -21,6 +21,9 @@ You can follow development on our [Discord server](https://moonlight-stream.org/
   - Set the VBAN stream (Stream Name: `Moonlight`, IP Address: `ip_of_your_client_pc`, Port: `6980`) as an audio source in Voicemeeter
   - Set `VoiceMeeter Output (VB-Audio VoiceMeeter VAIO)` as the default audio input of your Windows System
   - Enjoy the voicechat in your game
+- Stick calibration for game controllers
+  - Add environment variable `STREAM_GAMECONTROLLER_CALIBRATION_GUID_<guid> = <lx|ly|rx|ry><Center|Max|Min>:<calibration_value>` where the value is a comma separated list
+  - The default values of `calibration_value` are `Center = 0; Max = 32767; Min = -32768;`
 
 ## Features
  - Hardware accelerated video decoding on Windows, Mac, and Linux

@@ -10,6 +10,11 @@ You can follow development on our [Discord server](https://moonlight-stream.org/
  [![Downloads](https://img.shields.io/github/downloads/moonlight-stream/moonlight-qt/total)](https://github.com/moonlight-stream/moonlight-qt/releases)
  [![Translation Status](https://hosted.weblate.org/widgets/moonlight/-/moonlight-qt/svg-badge.svg)](https://hosted.weblate.org/projects/moonlight/moonlight-qt/)
 
+## Branch Features
+- Stick calibration for game controllers
+  - Add environment variable `STREAM_GAMECONTROLLER_CALIBRATION_GUID_<guid> = <lx|ly|rx|ry><Center|Max|Min>:<calibration_value>` where the value is a comma separated list
+  - The default values of `calibration_value` are `Center = 0; Max = 32767; Min = -32768;`
+
 ## Features
  - Hardware accelerated video decoding on Windows, Mac, and Linux
  - Supports streaming at up to 120 FPS (high refresh rate monitor recommended)

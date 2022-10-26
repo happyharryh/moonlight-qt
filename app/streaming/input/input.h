@@ -27,6 +27,12 @@ struct GamepadState {
     short lsX, lsY;
     short rsX, rsY;
     unsigned char lt, rt;
+
+    struct StickCal {
+        int center = 0;
+        int min = -32768;
+        int max = 32767;
+    } stickCal[2][2];
 };
 
 #define MAX_GAMEPADS 4

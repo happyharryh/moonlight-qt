@@ -29,10 +29,13 @@ struct GamepadState {
     unsigned char lt, rt;
 
     struct StickCal {
-        int center = 0;
-        int min = -32768;
-        int max = 32767;
-    } stickCal[2][2];
+        struct AxisCal {
+            int center = 0;
+            int min = -32768;
+            int max = 32767;
+        } axisCal[2];
+        unsigned short deadzone = 0;
+    } stickCal[2];
 };
 
 #define MAX_GAMEPADS 4

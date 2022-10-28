@@ -2,9 +2,11 @@
 
 #include <QUdpSocket>
 
-#include "input/input.h"
+#include <SDL.h>
 
 #define VERSION 1001
+
+struct GamepadState;
 
 namespace Cemuhook {
 
@@ -120,6 +122,23 @@ struct DataResponse {
     } motion;
 };
 
+struct MotionState {
+    SharedResponse::DeviceModel deviceModel = SharedResponse::DeviceModel::NOT_APPLICABLE;
+    DataResponse::MotionData motionData;
+
+    DataResponse::MotionData pendingMotionData[3];
+    size_t accelIndex = 0;
+    size_t gyroIndex = 0;
+    uint32_t inputTimestamp = 0;
+
+    uint64_t outputTimestamp = 0;
+    uint64_t outputInterval = 5000;
+    uint32_t sampleTimestamp = 0;
+    uint32_t sampleCount = 0;
+
+    bool updateByControllerSensorEvent(SDL_ControllerSensorEvent* event);
+};
+
 class Server : public QUdpSocket {
     Q_OBJECT
 
@@ -131,10 +150,10 @@ public:
     void destroy();
 
     static
-    void send(SDL_ControllerSensorEvent* event, GamepadState* state = nullptr);
+    void send(GamepadState* state);
 
 signals:
-    void sendSignal(const SDL_ControllerSensorEvent& event, const GamepadState& state);
+    void sendSignal(const GamepadState& state);
 
 private:
     explicit Server(QObject *parent = nullptr);
@@ -143,7 +162,7 @@ private:
 
     void handleReceive();
 
-    void handleSend(const SDL_ControllerSensorEvent& event, const GamepadState& state);
+    void handleSend(const GamepadState& state);
 
     void timerEvent(QTimerEvent*) override;
 
@@ -157,18 +176,6 @@ private:
         uint32_t lastTimestamp;
     };
     QList<Client> m_Clients;
-
-    struct Sensor {
-        DataResponse::MotionData motionData[3];
-        uint32_t inputTimestamp = 0;
-        size_t accelIndex = 0;
-        size_t gyroIndex = 0;
-
-        uint64_t outputTimestamp = 0;
-        uint64_t outputInterval = 5000;
-        uint32_t sampleTimestamp = 0;
-        uint32_t sampleCount = 0;
-    } m_Sensors[MAX_GAMEPADS];
 
     static Server* s_Server;
     static QThread* s_Thread;

@@ -1,4 +1,6 @@
-#include "cemuhook.h"
+#include "streaming/cemuhook.h"
+
+#include "input/input.h"
 
 namespace Cemuhook {
 
@@ -11,6 +13,66 @@ const QMap<SDL_JoystickPowerLevel, SharedResponse::Battery> SharedResponse::k_Ba
     {SDL_JOYSTICK_POWER_WIRED, Battery::CHARGING},
     {SDL_JOYSTICK_POWER_MAX, Battery::FULL}
 };
+
+bool MotionState::updateByControllerSensorEvent(SDL_ControllerSensorEvent* event) {
+    // In SDL 2.24.0, the order of the sensor events may be:
+    //     T1_gyro, T2_gyro, T3_gyro, T1_accel, T2_accel, T3_accel, ...
+    //     (See https://github.com/libsdl-org/SDL/blob/release-2.24.0/src/joystick/hidapi/SDL_hidapi_switch.c#L1999)
+    // The below codes are going to change the order to what we need:
+    //     (T1_accel, T1_gyro), (T2_accel, T2_gyro), (T3_accel, T3_gyro), ...
+    // In the future version of SDL, the order of the sensor events will become:
+    //     T1_gyro, T1_accel, T2_gyro, T2_accel, T3_gyro, T3_accel, ...
+    //     (See PR: https://github.com/libsdl-org/SDL/pull/6373)
+    // After that, the codes here can be simplified.
+    if (event->timestamp != inputTimestamp) {
+        accelIndex = 0;
+        gyroIndex = 0;
+        inputTimestamp = event->timestamp;
+    }
+
+    DataResponse::MotionData* motion;
+    if (event->sensor == SDL_SENSOR_ACCEL) {
+        motion = &pendingMotionData[accelIndex % 3];
+        constexpr float GRAVITY = 9.80665f;
+        motion->accX = - event->data[0] / GRAVITY;
+        motion->accY = - event->data[1] / GRAVITY;
+        motion->accZ = - event->data[2] / GRAVITY;
+        if (++accelIndex > gyroIndex)
+            return false;
+     } else if (event->sensor == SDL_SENSOR_GYRO) {
+        motion = &pendingMotionData[gyroIndex % 3];
+        constexpr float PI_FACTOR = 3.1415926535f * 2 / 312.0f;
+        motion->pitch = event->data[0] / PI_FACTOR;
+        motion->yaw = - event->data[1] / PI_FACTOR;
+        motion->roll = - event->data[2] / PI_FACTOR;
+        if (++gyroIndex > accelIndex)
+            return false;
+    } else {
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                    "Unhandled controller sensor: %d",
+                    event->sensor);
+        return false;
+    }
+
+    // The codes here impliment the feature of this commit in advance:
+    // https://github.com/libsdl-org/SDL/commit/18eb319adcba169c73bff27a13abe8a7ea08b0ff
+    if (sampleTimestamp == 0)
+        sampleTimestamp = SDL_GetTicks();
+
+    constexpr uint32_t SAMPLE_FREQUENCY = 1000;
+    if (++sampleCount >= SAMPLE_FREQUENCY) {
+        uint32_t now = SDL_GetTicks();
+        outputInterval = (now - sampleTimestamp) * 1000 / sampleCount;
+        sampleCount = 0;
+        sampleTimestamp = now;
+    }
+
+    outputTimestamp += outputInterval;
+    reinterpret_cast<uint64_t &>(motion->timestamp) = outputTimestamp;
+    memcpy(&motionData, motion, sizeof(motionData));
+
+    return true;
+}
 
 void Server::init(const QHostAddress& addr, uint16_t port, QObject *parent) {
     if (s_Server)
@@ -44,23 +106,17 @@ void Server::destroy() {
     qInfo("[CemuHook Server] Destroyed successfully.");
 }
 
-void Server::send(SDL_ControllerSensorEvent* event, GamepadState* state) {
+void Server::send(GamepadState* state) {
     if (!s_Server)
         init();
 
-    if (state) {
-        emit s_Server->sendSignal(*event, *state);
-    } else {
-        static const GamepadState nullState {};
-        emit s_Server->sendSignal(*event, nullState);
-    }
+    emit s_Server->sendSignal(*state);
 }
 
 Server::Server(QObject *parent) : QUdpSocket(parent),
     m_ServerId(IdentityManager::get()->getUniqueId().toULongLong(nullptr, 16)) {
     connect(this, &Server::readyRead, this, &Server::handleReceive);
 
-    qRegisterMetaType<SDL_ControllerSensorEvent>("SDL_ControllerSensorEvent");
     qRegisterMetaType<GamepadState>("GamepadState");
     connect(this, &Server::sendSignal, this, &Server::handleSend);
 }
@@ -187,74 +243,8 @@ void Server::handleReceive() {
     }
 }
 
-void Server::handleSend(const SDL_ControllerSensorEvent& event, const GamepadState& state) {
+void Server::handleSend(const GamepadState& state) {
     if (m_Clients.isEmpty()) {
-        return;
-    }
-
-    SDL_Joystick* joystick = SDL_JoystickFromInstanceID(event.which);
-    uint8_t slot = SDL_JoystickGetPlayerIndex(joystick);
-    if (slot >= MAX_GAMEPADS)
-        return;
-
-    /*
-        In SDL 2.24.0, the order of the sensor events may be:
-            T1_gyro, T2_gyro, T3_gyro, T1_accel, T2_accel, T3_accel, ...
-            (See https://github.com/libsdl-org/SDL/blob/release-2.24.0/src/joystick/hidapi/SDL_hidapi_switch.c#L1999)
-        The below codes are going to change the order to what we need:
-            (T1_accel, T1_gyro), (T2_accel, T2_gyro), (T3_accel, T3_gyro), ...
-        In the future version of SDL, the order of the sensor events will become:
-            T1_gyro, T1_accel, T2_gyro, T2_accel, T3_gyro, T3_accel, ...
-            (See PR: https://github.com/libsdl-org/SDL/pull/6373)
-        After that, the codes here can be simplified.
-    */
-    Sensor* sensor = &m_Sensors[slot];
-    if (event.timestamp != sensor->inputTimestamp) {
-        sensor->accelIndex = 0;
-        sensor->gyroIndex = 0;
-        sensor->inputTimestamp = event.timestamp;
-    }
-
-    DataResponse::MotionData* motion = nullptr;
-    if (event.sensor == SDL_SENSOR_ACCEL) {
-        DataResponse::MotionData* _motion = &sensor->motionData[sensor->accelIndex % 3];
-        constexpr float GRAVITY = 9.80665f;
-        _motion->accX = - event.data[0] / GRAVITY;
-        _motion->accY = - event.data[1] / GRAVITY;
-        _motion->accZ = - event.data[2] / GRAVITY;
-        if (++sensor->accelIndex <= sensor->gyroIndex)
-            motion = _motion;
-    } else if (event.sensor == SDL_SENSOR_GYRO) {
-        DataResponse::MotionData* _motion = &sensor->motionData[sensor->gyroIndex % 3];
-        constexpr float PI = 3.1415926535f / 312.0f;
-        _motion->pitch = event.data[0] / (PI * 2);
-        _motion->yaw = - event.data[1] / (PI * 2);
-        _motion->roll = - event.data[2] / (PI * 2);
-        if (++sensor->gyroIndex <= sensor->accelIndex)
-            motion = _motion;
-    } else {
-        return;
-    }
-
-    if (motion) {
-        /*
-            The codes here impliment the feature of this commit in advance:
-            https://github.com/libsdl-org/SDL/commit/18eb319adcba169c73bff27a13abe8a7ea08b0ff
-        */
-        if (sensor->sampleTimestamp == 0)
-            sensor->sampleTimestamp = SDL_GetTicks();
-
-        constexpr uint32_t SAMPLE_FREQUENCY = 1000;
-        if (++sensor->sampleCount >= SAMPLE_FREQUENCY) {
-            uint32_t now = SDL_GetTicks();
-            sensor->outputInterval = (now - sensor->sampleTimestamp) * 1000 / sensor->sampleCount;
-            sensor->sampleCount = 0;
-            sensor->sampleTimestamp = now;
-        }
-
-        sensor->outputTimestamp += sensor->outputInterval;
-        reinterpret_cast<uint64_t &>(motion->timestamp) = sensor->outputTimestamp;
-    } else {
         return;
     }
 
@@ -270,7 +260,7 @@ void Server::handleSend(const SDL_ControllerSensorEvent& event, const GamepadSta
         {                                                   // shared
             0,                                                  // slot
             SharedResponse::SlotState::CONNECTED,               // slotState
-            SharedResponse::DeviceModel::FULL_GYRO,             // deviceModel
+            SharedResponse::DeviceModel::NOT_APPLICABLE,        // deviceModel
             SharedResponse::Connection::NOT_APPLICABLE,         // connection
             {},                                                 // mac
             SharedResponse::Battery::NOT_APPLICABLE,            // battery
@@ -278,8 +268,11 @@ void Server::handleSend(const SDL_ControllerSensorEvent& event, const GamepadSta
         }
     };
 
-    response.shared.slot = slot;
+    response.shared.slot = state.index;
 
+    response.shared.deviceModel = state.motionState.deviceModel;
+
+    SDL_Joystick* joystick = SDL_JoystickFromInstanceID(state.jsId);
     if (const char* serial = SDL_JoystickGetSerial(joystick)) {
         sscanf_s(serial, "%hhx-%hhx-%hhx-%hhx-%hhx-%hhx",
                  &response.shared.mac[0], &response.shared.mac[1], &response.shared.mac[2],
@@ -290,49 +283,41 @@ void Server::handleSend(const SDL_ControllerSensorEvent& event, const GamepadSta
 
     response.shared.battery = SharedResponse::k_BatteryMap[SDL_JoystickCurrentPowerLevel(joystick)];
 
-    memcpy(&response.motion, motion, sizeof(response.motion));
+    response.buttons = (state.buttons & BACK_FLAG ? 0x1 : 0) |
+                       (state.buttons & LS_CLK_FLAG ? 0x2 : 0) |
+                       (state.buttons & RS_CLK_FLAG ? 0x4 : 0) |
+                       (state.buttons & PLAY_FLAG ? 0x8 : 0) |
+                       (state.buttons & UP_FLAG ? 0x10 : 0) |
+                       (state.buttons & RIGHT_FLAG ? 0x20 : 0) |
+                       (state.buttons & DOWN_FLAG ? 0x40 : 0) |
+                       (state.buttons & LEFT_FLAG ? 0x80 : 0) |
+                       (state.lt > 0 ? 0x100 : 0) |
+                       (state.rt > 0 ? 0x200 : 0) |
+                       (state.buttons & LB_FLAG ? 0x400 : 0) |
+                       (state.buttons & RB_FLAG ? 0x800 : 0) |
+                       (state.buttons & X_FLAG ? 0x1000 : 0) |
+                       (state.buttons & A_FLAG ? 0x2000 : 0) |
+                       (state.buttons & B_FLAG ? 0x4000 : 0) |
+                       (state.buttons & Y_FLAG ? 0x8000 : 0);
+    response.homeButton = state.buttons & SPECIAL_FLAG ? 1 : 0;
+    response.lsX = (state.lsX >> 8) + 0x80;
+    response.lsY = (state.lsY >> 8) + 0x80;
+    response.rsX = (state.rsX >> 8) + 0x80;
+    response.rsY = (state.rsY >> 8) + 0x80;
+    response.adLeft = state.buttons & LEFT_FLAG ? 0xFF : 0;
+    response.adDown = state.buttons & DOWN_FLAG ? 0xFF : 0;
+    response.adRight = state.buttons & RIGHT_FLAG ? 0xFF : 0;
+    response.adUp = state.buttons & UP_FLAG ? 0xFF : 0;
+    response.aY = state.buttons & Y_FLAG ? 0xFF : 0;
+    response.aB = state.buttons & B_FLAG ? 0xFF : 0;
+    response.aA = state.buttons & A_FLAG ? 0xFF : 0;
+    response.aX = state.buttons & X_FLAG ? 0xFF : 0;
+    response.aR1 = state.buttons & RB_FLAG ? 0xFF : 0;
+    response.aL1 = state.buttons & LB_FLAG ? 0xFF : 0;
+    response.aR2 = state.rt;
+    response.aL2 = state.lt;
 
-    if (state.controller) {
-        response.buttons = (state.buttons & BACK_FLAG ? 0x1 : 0) |
-                           (state.buttons & LS_CLK_FLAG ? 0x2 : 0) |
-                           (state.buttons & RS_CLK_FLAG ? 0x4 : 0) |
-                           (state.buttons & PLAY_FLAG ? 0x8 : 0) |
-                           (state.buttons & UP_FLAG ? 0x10 : 0) |
-                           (state.buttons & RIGHT_FLAG ? 0x20 : 0) |
-                           (state.buttons & DOWN_FLAG ? 0x40 : 0) |
-                           (state.buttons & LEFT_FLAG ? 0x80 : 0) |
-                           (state.lt > 0 ? 0x100 : 0) |
-                           (state.rt > 0 ? 0x200 : 0) |
-                           (state.buttons & LB_FLAG ? 0x400 : 0) |
-                           (state.buttons & RB_FLAG ? 0x800 : 0) |
-                           (state.buttons & X_FLAG ? 0x1000 : 0) |
-                           (state.buttons & A_FLAG ? 0x2000 : 0) |
-                           (state.buttons & B_FLAG ? 0x4000 : 0) |
-                           (state.buttons & Y_FLAG ? 0x8000 : 0);
-        response.homeButton = state.buttons & SPECIAL_FLAG ? 1 : 0;
-        response.lsX = (state.lsX >> 8) + 0x80;
-        response.lsY = (state.lsY >> 8) + 0x80;
-        response.rsX = (state.rsX >> 8) + 0x80;
-        response.rsY = (state.rsY >> 8) + 0x80;
-        response.adLeft = state.buttons & LEFT_FLAG ? 0xFF : 0;
-        response.adDown = state.buttons & DOWN_FLAG ? 0xFF : 0;
-        response.adRight = state.buttons & RIGHT_FLAG ? 0xFF : 0;
-        response.adUp = state.buttons & UP_FLAG ? 0xFF : 0;
-        response.aY = state.buttons & Y_FLAG ? 0xFF : 0;
-        response.aB = state.buttons & B_FLAG ? 0xFF : 0;
-        response.aA = state.buttons & A_FLAG ? 0xFF : 0;
-        response.aX = state.buttons & X_FLAG ? 0xFF : 0;
-        response.aR1 = state.buttons & RB_FLAG ? 0xFF : 0;
-        response.aL1 = state.buttons & LB_FLAG ? 0xFF : 0;
-        response.aR2 = state.rt;
-        response.aL2 = state.lt;
-    } else {
-        response.buttons = response.homeButton = 0;
-        response.lsX = response.lsY = response.rsX = response.rsY = 0x80;
-        response.adLeft = response.adDown = response.adRight = response.adUp = 0;
-        response.aY = response.aB = response.aA = response.aX = 0;
-        response.aR1 = response.aL1 = response.aR2 = response.aL2 = 0;
-    }
+    memcpy(&response.motion, &state.motionState.motionData, sizeof(response.motion));
 
     for (Client& client : m_Clients) {
         response.packetNumber = client.packetNumber++;

@@ -3,7 +3,6 @@
 #include <Limelight.h>
 #include <SDL.h>
 #include "settings/mappingmanager.h"
-#include "streaming/cemuhook.h"
 
 #include <QRegularExpression>
 #include <QtMath>
@@ -178,6 +177,10 @@ void SdlInputHandler::handleControllerAxisEvent(SDL_ControllerAxisEvent* event)
     if (state->mouseEmulationTimer == 0) {
         sendGamepadState(state);
     }
+
+    if (state->motionState.deviceModel != Cemuhook::SharedResponse::DeviceModel::FULL_GYRO) {
+        Cemuhook::Server::send(state);
+    }
 }
 
 void SdlInputHandler::handleControllerButtonEvent(SDL_ControllerButtonEvent* event)
@@ -314,6 +317,10 @@ void SdlInputHandler::handleControllerButtonEvent(SDL_ControllerButtonEvent* eve
     if (state->mouseEmulationTimer == 0) {
         sendGamepadState(state);
     }
+
+    if (state->motionState.deviceModel != Cemuhook::SharedResponse::DeviceModel::FULL_GYRO) {
+        Cemuhook::Server::send(state);
+    }
 }
 
 void SdlInputHandler::handleControllerSensorEvent(SDL_ControllerSensorEvent* event)
@@ -327,17 +334,8 @@ void SdlInputHandler::handleControllerSensorEvent(SDL_ControllerSensorEvent* eve
     // Batch all pending axis motion events for this gamepad to save CPU time
     SDL_Event nextEvent;
     for (;;) {
-        switch (event->sensor)
-        {
-            case SDL_SENSOR_ACCEL:
-            case SDL_SENSOR_GYRO:
-                Cemuhook::Server::send(event, state);
-                break;
-            default:
-                SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                            "Unhandled controller sensor: %d",
-                            event->sensor);
-                return;
+        if (state->motionState.updateByControllerSensorEvent(event)) {
+            Cemuhook::Server::send(state);
         }
 
         // Check for another event to batch with
@@ -353,11 +351,6 @@ void SdlInputHandler::handleControllerSensorEvent(SDL_ControllerSensorEvent* eve
 
         // Remove the next event to batch
         SDL_PeepEvents(&nextEvent, 1, SDL_GETEVENT, SDL_CONTROLLERSENSORUPDATE, SDL_CONTROLLERSENSORUPDATE);
-    }
-
-    // Only send the gamepad state to the host if it's not in mouse emulation mode
-    if (state->mouseEmulationTimer == 0) {
-        sendGamepadState(state);
     }
 }
 
@@ -486,12 +479,20 @@ void SdlInputHandler::handleControllerDeviceEvent(SDL_ControllerDeviceEvent* eve
             SDL_assert(m_GamepadMask == 0x1);
         }
 
+        state->motionState = Cemuhook::MotionState();
         if (m_CemuhookServer) {
             if (SDL_GameControllerHasSensor(state->controller, SDL_SENSOR_ACCEL)) {
                 SDL_GameControllerSetSensorEnabled(state->controller, SDL_SENSOR_ACCEL, SDL_TRUE);
             }
             if (SDL_GameControllerHasSensor(state->controller, SDL_SENSOR_GYRO)) {
                 SDL_GameControllerSetSensorEnabled(state->controller, SDL_SENSOR_GYRO, SDL_TRUE);
+            }
+
+            if (SDL_GameControllerIsSensorEnabled(state->controller, SDL_SENSOR_ACCEL) &&
+                SDL_GameControllerIsSensorEnabled(state->controller, SDL_SENSOR_GYRO)) {
+                state->motionState.deviceModel = Cemuhook::SharedResponse::DeviceModel::FULL_GYRO;
+            } else {
+                state->motionState.deviceModel = Cemuhook::SharedResponse::DeviceModel::DO_NOT_USE;
             }
         }
 

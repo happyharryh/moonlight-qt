@@ -4,7 +4,6 @@
 #include "settings/mappingmanager.h"
 #include "path.h"
 #include "utils.h"
-#include "streaming/cemuhook.h"
 
 #include <QtGlobal>
 #include <QDir>

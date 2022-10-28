@@ -2,6 +2,7 @@
 
 #include "settings/streamingpreferences.h"
 #include "backend/computermanager.h"
+#include "streaming/cemuhook.h"
 
 #include <SDL.h>
 
@@ -27,6 +28,8 @@ struct GamepadState {
     short lsX, lsY;
     short rsX, rsY;
     unsigned char lt, rt;
+
+    Cemuhook::MotionState motionState;
 
     struct StickCal {
         struct AxisCal {

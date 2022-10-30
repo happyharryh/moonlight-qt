@@ -21,6 +21,7 @@
 #define SER_APPLIST "apps"
 #define SER_SRVCERT "srvcert"
 #define SER_CUSTOMNAME "customname"
+#define SER_NVIDIASOFTWARE "nvidiasw"
 
 NvComputer::NvComputer(QSettings& settings)
 {
@@ -37,6 +38,7 @@ NvComputer::NvComputer(QSettings& settings)
     this->manualAddress = NvAddress(settings.value(SER_MANUALADDR).toString(),
                                     settings.value(SER_MANUALPORT, QVariant(DEFAULT_HTTP_PORT)).toUInt());
     this->serverCert = QSslCertificate(settings.value(SER_SRVCERT).toByteArray());
+    this->isNvidiaServerSoftware = settings.value(SER_NVIDIASOFTWARE).toBool();
 
     int appCount = settings.beginReadArray(SER_APPLIST);
     this->appList.reserve(appCount);
@@ -65,6 +67,8 @@ NvComputer::NvComputer(QSettings& settings)
 
 void NvComputer::setRemoteAddress(QHostAddress address)
 {
+    QWriteLocker lock(&this->lock);
+
     Q_ASSERT(this->externalPort != 0);
 
     this->remoteAddress = NvAddress(address, this->externalPort);
@@ -87,6 +91,7 @@ void NvComputer::serialize(QSettings& settings) const
     settings.setValue(SER_MANUALADDR, manualAddress.address());
     settings.setValue(SER_MANUALPORT, manualAddress.port());
     settings.setValue(SER_SRVCERT, serverCert.toPem());
+    settings.setValue(SER_NVIDIASOFTWARE, isNvidiaServerSoftware);
 
     // Avoid deleting an existing applist if we couldn't get one
     if (!appList.isEmpty()) {
@@ -175,6 +180,11 @@ NvComputer::NvComputer(NvHTTP& http, QString serverInfo)
         this->remoteAddress = NvAddress();
     }
 
+    // Real Nvidia host software (GeForce Experience and RTX Experience) both use the 'Mjolnir'
+    // codename in the state field and no version of Sunshine does. We can use this to bypass
+    // some assumptions about Nvidia hardware that don't apply to Sunshine hosts.
+    this->isNvidiaServerSoftware = NvHTTP::getXmlString(serverInfo, "state").contains("MJOLNIR");
+
     this->pairState = NvHTTP::getXmlString(serverInfo, "PairStatus") == "1" ?
                 PS_PAIRED : PS_NOT_PAIRED;
     this->currentGameId = NvHTTP::getCurrentGame(serverInfo);
@@ -187,16 +197,29 @@ NvComputer::NvComputer(NvHTTP& http, QString serverInfo)
     this->isSupportedServerVersion = CompatFetcher::isGfeVersionSupported(this->gfeVersion);
 }
 
-bool NvComputer::wake()
+bool NvComputer::wake() const
 {
-    if (state == NvComputer::CS_ONLINE) {
-        qWarning() << name << "is already online";
-        return true;
-    }
+    QByteArray wolPayload;
 
-    if (macAddress.isEmpty()) {
-        qWarning() << name << "has no MAC address stored";
-        return false;
+    {
+        QReadLocker readLocker(&lock);
+
+        if (state == NvComputer::CS_ONLINE) {
+            qWarning() << name << "is already online";
+            return true;
+        }
+
+        if (macAddress.isEmpty()) {
+            qWarning() << name << "has no MAC address stored";
+            return false;
+        }
+
+        // Create the WoL payload
+        wolPayload.append(QByteArray::fromHex("FFFFFFFFFFFF"));
+        for (int i = 0; i < 16; i++) {
+            wolPayload.append(macAddress);
+        }
+        Q_ASSERT(wolPayload.count() == 102);
     }
 
     const quint16 WOL_PORTS[] = {
@@ -204,14 +227,6 @@ bool NvComputer::wake()
         47998, 47999, 48000, 48002, 48010, // Ports opened by GFE
         47009, // Port opened by Moonlight Internet Hosting Tool for WoL (non-privileged port)
     };
-
-    // Create the WoL payload
-    QByteArray wolPayload;
-    wolPayload.append(QByteArray::fromHex("FFFFFFFFFFFF"));
-    for (int i = 0; i < 16; i++) {
-        wolPayload.append(macAddress);
-    }
-    Q_ASSERT(wolPayload.count() == 102);
 
     // Add the addresses that we know this host to be
     // and broadcast addresses for this link just in
@@ -278,16 +293,25 @@ bool NvComputer::wake()
     return success;
 }
 
-bool NvComputer::isReachableOverVpn()
+bool NvComputer::isReachableOverVpn() const
 {
-    if (activeAddress.isNull()) {
-        return false;
+    NvAddress copyOfActiveAddress;
+
+    {
+        QReadLocker readLocker(&lock);
+
+        if (activeAddress.isNull()) {
+            return false;
+        }
+
+        // Grab a copy of the active address to avoid having to hold
+        // the computer lock while doing socket operations
+        copyOfActiveAddress = activeAddress;
     }
 
     QTcpSocket s;
-
     s.setProxy(QNetworkProxy::NoProxy);
-    s.connectToHost(activeAddress.address(), activeAddress.port());
+    s.connectToHost(copyOfActiveAddress.address(), copyOfActiveAddress.port());
     if (s.waitForConnected(3000)) {
         Q_ASSERT(!s.localAddress().isNull());
 
@@ -375,6 +399,7 @@ bool NvComputer::updateAppList(QVector<NvApp> newAppList) {
 
 QVector<NvAddress> NvComputer::uniqueAddresses() const
 {
+    QReadLocker readLocker(&lock);
     QVector<NvAddress> uniqueAddressList;
 
     // Start with addresses correctly ordered
@@ -406,7 +431,7 @@ QVector<NvAddress> NvComputer::uniqueAddresses() const
     return uniqueAddressList;
 }
 
-bool NvComputer::update(NvComputer& that)
+bool NvComputer::update(const NvComputer& that)
 {
     bool changed = false;
 
@@ -456,6 +481,7 @@ bool NvComputer::update(NvComputer& that)
     ASSIGN_IF_CHANGED(gfeVersion);
     ASSIGN_IF_CHANGED(appVersion);
     ASSIGN_IF_CHANGED(isSupportedServerVersion);
+    ASSIGN_IF_CHANGED(isNvidiaServerSoftware);
     ASSIGN_IF_CHANGED(maxLumaPixelsHEVC);
     ASSIGN_IF_CHANGED(gpuModel);
     ASSIGN_IF_CHANGED_AND_NONNULL(serverCert);

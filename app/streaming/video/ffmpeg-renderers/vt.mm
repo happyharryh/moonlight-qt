@@ -40,16 +40,28 @@ public:
           m_FormatDesc(nullptr),
           m_StreamView(nullptr),
           m_DisplayLink(nullptr),
-          m_LastAvColorSpace(AVCOL_SPC_UNSPECIFIED),
+          m_LastColorSpace(-1),
           m_ColorSpace(nullptr),
           m_VsyncMutex(nullptr),
           m_VsyncPassed(nullptr)
     {
         SDL_zero(m_OverlayTextFields);
+        for (int i = 0; i < Overlay::OverlayMax; i++) {
+            m_OverlayUpdateBlocks[i] = dispatch_block_create(DISPATCH_BLOCK_DETACHED, ^{
+                updateOverlayOnMainThread((Overlay::OverlayType)i);
+            });
+        }
     }
 
     virtual ~VTRenderer() override
     {
+        // We may have overlay update blocks enqueued for execution.
+        // We must cancel those to avoid a UAF.
+        for (int i = 0; i < Overlay::OverlayMax; i++) {
+            dispatch_block_cancel(m_OverlayUpdateBlocks[i]);
+            Block_release(m_OverlayUpdateBlocks[i]);
+        }
+
         if (m_DisplayLink != nullptr) {
             CVDisplayLinkStop(m_DisplayLink);
             CVDisplayLinkRelease(m_DisplayLink);
@@ -200,27 +212,26 @@ public:
 
         // Reset m_ColorSpace if the colorspace changes. This can happen when
         // a game enters HDR mode (Rec 601 -> Rec 2020).
-        if (frame->colorspace != m_LastAvColorSpace) {
+        int colorspace = getFrameColorspace(frame);
+        if (colorspace != m_LastColorSpace) {
             if (m_ColorSpace != nullptr) {
                 CGColorSpaceRelease(m_ColorSpace);
                 m_ColorSpace = nullptr;
             }
 
-            switch (frame->colorspace) {
-            case AVCOL_SPC_BT709:
+            switch (colorspace) {
+            case COLORSPACE_REC_709:
                 m_ColorSpace = CGColorSpaceCreateWithName(kCGColorSpaceITUR_709);
                 break;
-            case AVCOL_SPC_BT2020_NCL:
+            case COLORSPACE_REC_2020:
                 m_ColorSpace = CGColorSpaceCreateWithName(kCGColorSpaceITUR_2020);
                 break;
-            case AVCOL_SPC_SMPTE170M:
+            case COLORSPACE_REC_601:
                 m_ColorSpace = CGColorSpaceCreateWithName(kCGColorSpaceSRGB);
-                break;
-            default:
                 break;
             }
 
-            m_LastAvColorSpace = frame->colorspace;
+            m_LastColorSpace = colorspace;
         }
 
         if (m_ColorSpace != nullptr) {
@@ -454,34 +465,11 @@ public:
         [m_OverlayTextFields[type] setHidden: !Session::get()->getOverlayManager().isOverlayEnabled(type)];
     }
 
-    static void updateDebugOverlayOnMainThread(void* context)
-    {
-        VTRenderer* me = (VTRenderer*)context;
-
-        me->updateOverlayOnMainThread(Overlay::OverlayDebug);
-    }
-
-    static void updateStatusOverlayOnMainThread(void* context)
-    {
-        VTRenderer* me = (VTRenderer*)context;
-
-        me->updateOverlayOnMainThread(Overlay::OverlayStatusUpdate);
-    }
-
     virtual void notifyOverlayUpdated(Overlay::OverlayType type) override
     {
         // We must do the actual UI updates on the main thread, so queue an
         // async callback on the main thread via GCD to do the UI update.
-        switch (type) {
-        case Overlay::OverlayDebug:
-            dispatch_async_f(dispatch_get_main_queue(), this, updateDebugOverlayOnMainThread);
-            break;
-        case Overlay::OverlayStatusUpdate:
-            dispatch_async_f(dispatch_get_main_queue(), this, updateStatusOverlayOnMainThread);
-            break;
-        default:
-            break;
-        }
+        dispatch_async(dispatch_get_main_queue(), m_OverlayUpdateBlocks[type]);
     }
 
     virtual bool prepareDecoderContext(AVCodecContext* context, AVDictionary**) override
@@ -509,6 +497,11 @@ public:
         return COLORSPACE_REC_601;
     }
 
+    int getDecoderCapabilities() override
+    {
+        return CAPABILITY_REFERENCE_FRAME_INVALIDATION_HEVC;
+    }
+
     int getRendererAttributes() override
     {
         // AVSampleBufferDisplayLayer supports HDR output
@@ -520,9 +513,10 @@ private:
     AVSampleBufferDisplayLayer* m_DisplayLayer;
     CMVideoFormatDescriptionRef m_FormatDesc;
     NSView* m_StreamView;
+    dispatch_block_t m_OverlayUpdateBlocks[Overlay::OverlayMax];
     NSTextField* m_OverlayTextFields[Overlay::OverlayMax];
     CVDisplayLinkRef m_DisplayLink;
-    AVColorSpace m_LastAvColorSpace;
+    int m_LastColorSpace;
     CGColorSpaceRef m_ColorSpace;
     SDL_mutex* m_VsyncMutex;
     SDL_cond* m_VsyncPassed;

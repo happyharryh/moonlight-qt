@@ -732,6 +732,15 @@ bool EGLRenderer::initialize(PDECODER_PARAMETERS params)
     // Detach the context from this thread, so the render thread can attach it
     SDL_GL_MakeCurrent(m_Window, nullptr);
 
+#ifdef SDL_HINT_VIDEO_X11_FORCE_EGL
+    if (err == GL_NO_ERROR) {
+        // If we got a working GL implementation via EGL, avoid using GLX from now on.
+        // GLX will cause problems if we later want to use EGL again on this window.
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "EGL passed preflight checks. Using EGL for GL context creation.");
+        SDL_SetHint(SDL_HINT_VIDEO_X11_FORCE_EGL, "1");
+    }
+#endif
+
     return err == GL_NO_ERROR;
 }
 
@@ -739,10 +748,7 @@ const float *EGLRenderer::getColorOffsets(const AVFrame* frame) {
     static const float limitedOffsets[] = { 16.0f / 255.0f, 128.0f / 255.0f, 128.0f / 255.0f };
     static const float fullOffsets[] = { 0.0f, 128.0f / 255.0f, 128.0f / 255.0f };
 
-    // This handles the case where the color range is unknown,
-    // so that we use Limited color range which is the default
-    // behavior for Moonlight.
-    return (frame->color_range == AVCOL_RANGE_JPEG) ? fullOffsets : limitedOffsets;
+    return isFrameFullRange(frame) ? fullOffsets : limitedOffsets;
 }
 
 const float *EGLRenderer::getColorMatrix(const AVFrame* frame) {
@@ -780,33 +786,17 @@ const float *EGLRenderer::getColorMatrix(const AVFrame* frame) {
         1.4746f, -0.5714f, 0.0f
     };
 
-    // This handles the case where the color range is unknown,
-    // so that we use Limited color range which is the default
-    // behavior for Moonlight.
-    bool fullRange = (frame->color_range == AVCOL_RANGE_JPEG);
-    switch (frame->colorspace) {
-        case AVCOL_SPC_SMPTE170M:
-        case AVCOL_SPC_BT470BG:
+    bool fullRange = isFrameFullRange(frame);
+    switch (getFrameColorspace(frame)) {
+        case COLORSPACE_REC_601:
             return fullRange ? bt601Full : bt601Lim;
-        case AVCOL_SPC_BT709:
+        case COLORSPACE_REC_709:
             return fullRange ? bt709Full : bt709Lim;
-        case AVCOL_SPC_BT2020_NCL:
-        case AVCOL_SPC_BT2020_CL:
+        case COLORSPACE_REC_2020:
             return fullRange ? bt2020Full : bt2020Lim;
         default:
-            // Some backends don't populate this, so we'll assume
-            // the host gave us what we asked for by default.
-            switch (getDecoderColorspace()) {
-                case COLORSPACE_REC_601:
-                    return fullRange ? bt601Full : bt601Lim;
-                case COLORSPACE_REC_709:
-                    return fullRange ? bt709Full : bt709Lim;
-                case COLORSPACE_REC_2020:
-                    return fullRange ? bt2020Full : bt2020Lim;
-                default:
-                    SDL_assert(false);
-            }
-    };
+            SDL_assert(false);
+    }
 
     return bt601Lim;
 }

@@ -12,8 +12,9 @@
 #include <unistd.h>
 #include <fcntl.h>
 
-VAAPIRenderer::VAAPIRenderer()
-    : m_HwContext(nullptr),
+VAAPIRenderer::VAAPIRenderer(int decoderSelectionPass)
+    : m_DecoderSelectionPass(decoderSelectionPass),
+      m_HwContext(nullptr),
       m_BlacklistedForDirectRendering(false),
       m_OverlayMutex(nullptr)
 {
@@ -193,6 +194,13 @@ VAAPIRenderer::initialize(PDECODER_PARAMETERS params)
                 status = vaInitialize(vaDeviceContext->display, &major, &minor);
             }
 
+            if (status != VA_STATUS_SUCCESS && (m_WindowSystem != SDL_SYSWM_X11 || m_DecoderSelectionPass > 0)) {
+                // The unofficial nvidia VAAPI driver over NVDEC/CUDA works well on Wayland,
+                // but we'd rather use CUDA for XWayland and VDPAU for regular X11.
+                qputenv("LIBVA_DRIVER_NAME", "nvidia");
+                status = vaInitialize(vaDeviceContext->display, &major, &minor);
+            }
+
             if (status != VA_STATUS_SUCCESS) {
                 // Unset LIBVA_DRIVER_NAME if none of the drivers we tried worked. This ensures
                 // we will get a fresh start using the default driver selection behavior after
@@ -254,19 +262,31 @@ VAAPIRenderer::initialize(PDECODER_PARAMETERS params)
                 "Driver: %s",
                 vendorString ? vendorString : "<unknown>");
 
+    // The Snap (core22) and Focal/Jammy Mesa drivers have a bug that causes
+    // a large amount of video latency when using more than one reference frame
+    // and severe rendering glitches on my Ryzen 3300U system.
+    m_HasRfiLatencyBug = vendorStr.contains("Gallium", Qt::CaseInsensitive) && qgetenv("IGNORE_RFI_LATENCY_BUG") != "1";
+    if (m_HasRfiLatencyBug) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "VAAPI driver is affected by RFI latency bug");
+    }
+
     // Older versions of the Gallium VAAPI driver have a nasty memory leak that
     // causes memory to be leaked for each submitted frame. I believe this is
-    // resolved in the libva2 drivers (VAAPI 1.x).
-    // If we're using Wayland, we have no choice but to use VAAPI because VDPAU
-    // is only supported under X11 or XWayland.
-    if (major == 0 && qgetenv("FORCE_VAAPI") != "1" && !WMUtils::isRunningWayland()) {
-        if (vendorStr.contains("AMD", Qt::CaseInsensitive) ||
-                vendorStr.contains("Radeon", Qt::CaseInsensitive)) {
-            // Fail and let VDPAU pick this up
-            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
-                        "Avoiding VAAPI on AMD driver");
-            return false;
-        }
+    // resolved in the libva2 drivers (VAAPI 1.x). We will try to use VDPAU
+    // instead for old VAAPI versions or drivers affected by the RFI latency bug.
+    if (m_DecoderSelectionPass == 0 && (major == 0 || m_HasRfiLatencyBug) && qgetenv("FORCE_VAAPI") != "1" && vendorStr.contains("Gallium", Qt::CaseInsensitive)) {
+        // Fail and let VDPAU pick this up
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "Deprioritizing VAAPI on Gallium driver. Set FORCE_VAAPI=1 to override.");
+        return false;
+    }
+
+    if (m_DecoderSelectionPass == 0 && qgetenv("FORCE_VAAPI") != "1" && vendorStr.contains("VA-API NVDEC", Qt::CaseInsensitive)) {
+        // Prefer CUDA for XWayland and VDPAU for regular X11.
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "Deprioritizing VAAPI for NVIDIA driver on X11/XWayland. Set FORCE_VAAPI=1 to override.");
+        return false;
     }
 
     if (WMUtils::isRunningWayland()) {
@@ -457,6 +477,17 @@ int VAAPIRenderer::getDecoderColorspace()
     return COLORSPACE_REC_601;
 }
 
+int VAAPIRenderer::getDecoderCapabilities()
+{
+    int caps = 0;
+
+    if (!m_HasRfiLatencyBug) {
+        caps |= CAPABILITY_REFERENCE_FRAME_INVALIDATION_HEVC;
+    }
+
+    return caps;
+}
+
 void VAAPIRenderer::notifyOverlayUpdated(Overlay::OverlayType type)
 {
     AVHWDeviceContext* deviceContext = (AVHWDeviceContext*)m_HwContext->data;
@@ -607,19 +638,15 @@ VAAPIRenderer::renderFrame(AVFrame* frame)
 
         // NB: Not all VAAPI drivers respect these flags. Many drivers
         // just ignore them and do the color conversion as Rec 601.
-        switch (frame->colorspace) {
-        case AVCOL_SPC_BT709:
+        switch (getFrameColorspace(frame)) {
+        case COLORSPACE_REC_709:
             flags |= VA_SRC_BT709;
             break;
-        case AVCOL_SPC_BT470BG:
-        case AVCOL_SPC_SMPTE170M:
+        case COLORSPACE_REC_601:
             flags |= VA_SRC_BT601;
             break;
-        case AVCOL_SPC_SMPTE240M:
-            flags |= VA_SRC_SMPTE_240;
-            break;
         default:
-            // Unknown colorspace
+            // Unsupported colorspace
             SDL_assert(false);
             break;
         }

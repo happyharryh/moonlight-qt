@@ -68,6 +68,12 @@ SLVideoDecoder::getDecoderColorspace()
     return COLORSPACE_REC_709;
 }
 
+int
+SLVideoDecoder::getDecoderColorRange()
+{
+    return COLOR_RANGE_LIMITED;
+}
+
 QSize SLVideoDecoder::getDecoderMaxResolution()
 {
     return QSize(1920, 1080);
@@ -123,8 +129,9 @@ SLVideoDecoder::submitDecodeUnit(PDECODE_UNIT du)
     err = SLVideo_BeginFrame(m_VideoStream, du->fullLength);
     if (err < 0) {
         SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
-                    "SLVideo_BeginFrame() failed: %d",
-                    err);
+                    "SLVideo_BeginFrame() failed: %d (frame %d)",
+                    err,
+                    du->frameNumber);
 
         // Need an IDR frame to resync
         return DR_NEED_IDR;
@@ -137,8 +144,9 @@ SLVideoDecoder::submitDecodeUnit(PDECODE_UNIT du)
                                      entry->length);
         if (err < 0) {
             SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
-                        "SLVideo_WriteFrameData() failed: %d",
-                        err);
+                        "SLVideo_WriteFrameData() failed: %d (frame %d)",
+                        err,
+                        du->frameNumber);
 
             // Need an IDR frame to resync
             return DR_NEED_IDR;
@@ -150,8 +158,9 @@ SLVideoDecoder::submitDecodeUnit(PDECODE_UNIT du)
     err = SLVideo_SubmitFrame(m_VideoStream);
     if (err < 0) {
         SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
-                    "SLVideo_SubmitFrame() failed: %d",
-                    err);
+                    "SLVideo_SubmitFrame() failed: %d (frame %d)",
+                    err,
+                    du->frameNumber);
 
         // Need an IDR frame to resync
         return DR_NEED_IDR;

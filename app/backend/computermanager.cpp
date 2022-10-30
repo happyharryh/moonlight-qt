@@ -147,7 +147,8 @@ ComputerManager::ComputerManager(QObject *parent)
     : QObject(parent),
       m_PollingRef(0),
       m_MdnsBrowser(nullptr),
-      m_CompatFetcher(nullptr)
+      m_CompatFetcher(nullptr),
+      m_NeedsDelayedFlush(false)
 {
     QSettings settings;
 
@@ -163,6 +164,10 @@ ComputerManager::ComputerManager(QObject *parent)
     // Fetch latest compatibility data asynchronously
     m_CompatFetcher.start();
 
+    // Start the delayed flush thread to handle saveHosts() calls
+    m_DelayedFlushThread = new DelayedFlushThread(this);
+    m_DelayedFlushThread->start();
+
     // To quit in a timely manner, we must block additional requests
     // after we receive the aboutToQuit() signal. This is neccessary
     // because NvHTTP uses aboutToQuit() to abort requests in progres
@@ -173,6 +178,21 @@ ComputerManager::ComputerManager(QObject *parent)
 
 ComputerManager::~ComputerManager()
 {
+    // Stop the delayed flush thread before acquiring the lock in write mode
+    // to avoid deadlocking with a flush that needs the lock in read mode.
+    {
+        // Wake the delayed flush thread
+        m_DelayedFlushThread->requestInterruption();
+        m_DelayedFlushCondition.wakeOne();
+
+        // Wait for it to terminate (and finish any pending flush)
+        m_DelayedFlushThread->wait();
+        delete m_DelayedFlushThread;
+
+        // Delayed flushes should have completed by now
+        Q_ASSERT(!m_NeedsDelayedFlush);
+    }
+
     QWriteLocker lock(&m_Lock);
 
     // Delete machines that haven't been resolved yet
@@ -202,19 +222,53 @@ ComputerManager::~ComputerManager()
     }
 }
 
+void DelayedFlushThread::run() {
+    for (;;) {
+        // Wait for a delayed flush request or an interruption
+        {
+            QMutexLocker locker(&m_ComputerManager->m_DelayedFlushMutex);
+
+            while (!QThread::currentThread()->isInterruptionRequested() && !m_ComputerManager->m_NeedsDelayedFlush) {
+                m_ComputerManager->m_DelayedFlushCondition.wait(&m_ComputerManager->m_DelayedFlushMutex);
+            }
+
+            // Bail without flushing if we woke up for an interruption alone.
+            // If we have both an interruption and a flush request, do the flush.
+            if (!m_ComputerManager->m_NeedsDelayedFlush) {
+                Q_ASSERT(QThread::currentThread()->isInterruptionRequested());
+                break;
+            }
+
+            // Reset the delayed flush flag to ensure any racing saveHosts() call will set it again
+            m_ComputerManager->m_NeedsDelayedFlush = false;
+        }
+
+        // Perform the flush
+        {
+            QReadLocker lock(&m_ComputerManager->m_Lock);
+
+            QSettings settings;
+            settings.remove(SER_HOSTS);
+            settings.beginWriteArray(SER_HOSTS);
+            int i = 0;
+            for (const NvComputer* computer : m_ComputerManager->m_KnownHosts) {
+                settings.setArrayIndex(i++);
+                computer->serialize(settings);
+            }
+            settings.endArray();
+        }
+    }
+}
+
 void ComputerManager::saveHosts()
 {
-    QSettings settings;
-    QReadLocker lock(&m_Lock);
+    Q_ASSERT(m_DelayedFlushThread != nullptr && m_DelayedFlushThread->isRunning());
 
-    settings.remove(SER_HOSTS);
-    settings.beginWriteArray(SER_HOSTS);
-    int i = 0;
-    for (const NvComputer* computer : m_KnownHosts) {
-        settings.setArrayIndex(i++);
-        computer->serialize(settings);
-    }
-    settings.endArray();
+    // Punt to a worker thread because QSettings on macOS can take ages (> 500 ms)
+    // to persist our host list to disk (especially when a host has a bunch of apps).
+    QMutexLocker locker(&m_DelayedFlushMutex);
+    m_NeedsDelayedFlush = true;
+    m_DelayedFlushCondition.wakeOne();
 }
 
 QHostAddress ComputerManager::getBestGlobalAddressV6(QVector<QHostAddress> &addresses)
@@ -442,7 +496,7 @@ void ComputerManager::clientSideAttributeUpdated(NvComputer* computer)
 
 void ComputerManager::handleAboutToQuit()
 {
-    QWriteLocker lock(&m_Lock);
+    QReadLocker lock(&m_Lock);
 
     // Interrupt polling threads immediately, so they
     // avoid making additional requests while quitting
@@ -478,13 +532,18 @@ private:
            switch (result)
            {
            case NvPairingManager::PairState::PIN_WRONG:
-               emit pairingCompleted(m_Computer, "The PIN from the PC didn't match. Please try again.");
+               emit pairingCompleted(m_Computer, tr("The PIN from the PC didn't match. Please try again."));
                break;
            case NvPairingManager::PairState::FAILED:
-               emit pairingCompleted(m_Computer, "Pairing failed. Please try again.");
+               if (m_Computer->currentGameId != 0) {
+                   emit pairingCompleted(m_Computer, tr("You cannot pair while a previous session is still running on the host PC. Quit any running games or reboot the host PC, then try pairing again."));
+               }
+               else {
+                   emit pairingCompleted(m_Computer, tr("Pairing failed. Please try again."));
+               }
                break;
            case NvPairingManager::PairState::ALREADY_IN_PROGRESS:
-               emit pairingCompleted(m_Computer, "Another pairing attempt is already in progress.");
+               emit pairingCompleted(m_Computer, tr("Another pairing attempt is already in progress."));
                break;
            case NvPairingManager::PairState::PAIRED:
                // Persist the newly pinned server certificate for this host
@@ -494,7 +553,7 @@ private:
                break;
            }
         } catch (const GfeHttpResponseException& e) {
-            emit pairingCompleted(m_Computer, "GeForce Experience returned error: " + e.toQString());
+            emit pairingCompleted(m_Computer, tr("GeForce Experience returned error: %1").arg(e.toQString()));
         } catch (const QtNetworkReplyException& e) {
             emit pairingCompleted(m_Computer, e.toQString());
         }
@@ -618,12 +677,15 @@ public:
         : m_ComputerManager(computerManager),
           m_Address(address),
           m_MdnsIpv6Address(mdnsIpv6Address),
-          m_Mdns(mdns)
+          m_Mdns(mdns),
+          m_AboutToQuit(false)
     {
         connect(this, &PendingAddTask::computerAddCompleted,
                 computerManager, &ComputerManager::computerAddCompleted);
         connect(this, &PendingAddTask::computerStateChanged,
                 computerManager, &ComputerManager::handleComputerStateChanged);
+        connect(QCoreApplication::instance(), &QCoreApplication::aboutToQuit,
+                this, &PendingAddTask::handleAboutToQuit);
     }
 
 signals:
@@ -632,9 +694,20 @@ signals:
     void computerStateChanged(NvComputer* computer);
 
 private:
+    void handleAboutToQuit()
+    {
+        m_AboutToQuit = true;
+    }
+
     QString fetchServerInfo(NvHTTP& http)
     {
         QString serverInfo;
+
+        // Do nothing if we're quitting
+        if (m_AboutToQuit) {
+            return QString();
+        }
+
         try {
             // There's a race condition between GameStream servers reporting presence over
             // mDNS and the HTTPS server being ready to respond to our queries. To work
@@ -756,16 +829,31 @@ private:
                 hostAddress.isInSubnet(QHostAddress("192.168.0.0"), 16);
 
         {
-            // Check if this PC already exists
-            QWriteLocker lock(&m_ComputerManager->m_Lock);
+            // Check if this PC already exists using opportunistic read lock
+            m_ComputerManager->m_Lock.lockForRead();
             NvComputer* existingComputer = m_ComputerManager->m_KnownHosts.value(newComputer->uuid);
+
+            // If it doesn't already exist, convert to a write lock in preparation for updating.
+            //
+            // NB: ComputerManager's lock protects the host map itself, not the elements inside.
+            // Those are protected by their individual locks. Since we only mutate the map itself
+            // when the PC doesn't exist, we need the lock in write-mode for that case only.
+            if (existingComputer == nullptr) {
+                m_ComputerManager->m_Lock.unlock();
+                m_ComputerManager->m_Lock.lockForWrite();
+
+                // Since we had to unlock to lock for write, someone could have raced and added
+                // this PC before us. We have to check again whether it already exists.
+                existingComputer = m_ComputerManager->m_KnownHosts.value(newComputer->uuid);
+            }
+
             if (existingComputer != nullptr) {
                 // Fold it into the existing PC
                 bool changed = existingComputer->update(*newComputer);
                 delete newComputer;
 
                 // Drop the lock before notifying
-                lock.unlock();
+                m_ComputerManager->m_Lock.unlock();
 
                 // For non-mDNS clients, let them know it succeeded
                 if (!m_Mdns) {
@@ -786,7 +874,7 @@ private:
                 m_ComputerManager->startPollingComputer(newComputer);
 
                 // Drop the lock before notifying
-                lock.unlock();
+                m_ComputerManager->m_Lock.unlock();
 
                 // If this wasn't added via mDNS but it is a RFC 1918 IPv4 address and not a VPN,
                 // go ahead and do the STUN request now to populate an external address.
@@ -794,9 +882,7 @@ private:
                     quint32 addr;
                     int err = LiFindExternalAddressIP4("stun.moonlight-stream.org", 3478, &addr);
                     if (err == 0) {
-                        lock.relock();
                         newComputer->setRemoteAddress(QHostAddress(qFromBigEndian(addr)));
-                        lock.unlock();
                     }
                     else {
                         qWarning() << "STUN failed to get WAN address:" << err;
@@ -818,6 +904,7 @@ private:
     NvAddress m_Address;
     NvAddress m_MdnsIpv6Address;
     bool m_Mdns;
+    bool m_AboutToQuit;
 };
 
 void ComputerManager::addNewHost(NvAddress address, bool mdns, NvAddress mdnsIpv6Address)

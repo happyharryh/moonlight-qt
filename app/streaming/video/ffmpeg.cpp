@@ -47,6 +47,22 @@
 
 #define FAILED_DECODES_RESET_THRESHOLD 20
 
+static const struct {
+    const char* codec;
+    int capabilities;
+} k_NonHwaccelCodecInfo[] = {
+    {"h264_mmal", 0},
+    {"h264_rkmpp", 0},
+    {"h264_nvv4l2", 0},
+    {"h264_nvmpi", 0},
+    {"h264_v4l2m2m", 0},
+
+    {"hevc_rkmpp", 0},
+    {"hevc_nvv4l2", CAPABILITY_REFERENCE_FRAME_INVALIDATION_HEVC},
+    {"hevc_nvmpi", 0},
+    {"hevc_v4l2m2m", 0},
+};
+
 bool FFmpegVideoDecoder::isHardwareAccelerated()
 {
     return m_HwDecodeCfg != nullptr ||
@@ -70,18 +86,49 @@ void FFmpegVideoDecoder::setHdrMode(bool enabled)
 
 int FFmpegVideoDecoder::getDecoderCapabilities()
 {
-    int capabilities = m_BackendRenderer->getDecoderCapabilities();
+    bool ok;
 
-    if (!isHardwareAccelerated()) {
-        // Slice up to 4 times for parallel CPU decoding, once slice per core
-        int slices = qMin(MAX_SLICES, SDL_GetCPUCount());
-        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                    "Encoder configured for %d slices per frame",
-                    slices);
-        capabilities |= CAPABILITY_SLICES_PER_FRAME(slices);
+    int capabilities = qEnvironmentVariableIntValue("DECODER_CAPS", &ok);
+    if (ok) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "Using decoder capability override: 0x%x",
+                    capabilities);
+    }
+    else {
+        // Start with the backend renderer's capabilities
+        capabilities = m_BackendRenderer->getDecoderCapabilities();
+
+        if (!isHardwareAccelerated()) {
+            // Slice up to 4 times for parallel CPU decoding, once slice per core
+            int slices = qMin(MAX_SLICES, SDL_GetCPUCount());
+            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                        "Encoder configured for %d slices per frame",
+                        slices);
+            capabilities |= CAPABILITY_SLICES_PER_FRAME(slices);
+
+            // Enable HEVC RFI when using the FFmpeg software decoder
+            capabilities |= CAPABILITY_REFERENCE_FRAME_INVALIDATION_HEVC;
+        }
+        else if (m_HwDecodeCfg == nullptr) {
+            // We have a non-hwaccel hardware decoder. This will always
+            // be using SDLRenderer so we will pick decoder capabilities
+            // based on the decoder name.
+            for (int i = 0; i < SDL_arraysize(k_NonHwaccelCodecInfo); i++) {
+                if (strcmp(m_VideoDecoderCtx->codec->name, k_NonHwaccelCodecInfo[i].codec) == 0) {
+                    capabilities = k_NonHwaccelCodecInfo[i].capabilities;
+                    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                                "Found capabilities for non-hwaccel decoder: %s -> %d",
+                                m_VideoDecoderCtx->codec->name,
+                                capabilities);
+                    break;
+                }
+            }
+        }
     }
 
-    // We use our own decoder thread with the "pull" model
+    // We use our own decoder thread with the "pull" model. This cannot
+    // be overridden using the by the user because it is critical to
+    // our operation.
     capabilities |= CAPABILITY_PULL_RENDERER;
 
     return capabilities;
@@ -90,6 +137,11 @@ int FFmpegVideoDecoder::getDecoderCapabilities()
 int FFmpegVideoDecoder::getDecoderColorspace()
 {
     return m_FrontendRenderer->getDecoderColorspace();
+}
+
+int FFmpegVideoDecoder::getDecoderColorRange()
+{
+    return m_FrontendRenderer->getDecoderColorRange();
 }
 
 QSize FFmpegVideoDecoder::getDecoderMaxResolution()
@@ -523,7 +575,12 @@ void FFmpegVideoDecoder::stringifyVideoStats(VIDEO_STATS& stats, char* output)
         break;
 
     case VIDEO_FORMAT_H265_MAIN10:
-        codecString = "HEVC Main 10";
+        if (LiGetCurrentHostDisplayHdrMode()) {
+            codecString = "HEVC Main 10 HDR";
+        }
+        else {
+            codecString = "HEVC Main 10 SDR";
+        }
         break;
 
     default:
@@ -616,7 +673,7 @@ IFFmpegRenderer* FFmpegVideoDecoder::createHwAccelRenderer(const AVCodecHWConfig
 #endif
 #ifdef HAVE_LIBVA
         case AV_HWDEVICE_TYPE_VAAPI:
-            return new VAAPIRenderer();
+            return new VAAPIRenderer(pass);
 #endif
 #ifdef HAVE_LIBVDPAU
         case AV_HWDEVICE_TYPE_VDPAU:
@@ -646,6 +703,14 @@ IFFmpegRenderer* FFmpegVideoDecoder::createHwAccelRenderer(const AVCodecHWConfig
             return new DXVA2Renderer(pass);
         case AV_HWDEVICE_TYPE_D3D11VA:
             return new D3D11VARenderer(pass);
+#endif
+#ifdef HAVE_LIBVA
+        case AV_HWDEVICE_TYPE_VAAPI:
+            return new VAAPIRenderer(pass);
+#endif
+#ifdef HAVE_LIBVDPAU
+        case AV_HWDEVICE_TYPE_VDPAU:
+            return new VDPAURenderer();
 #endif
         default:
             return nullptr;
@@ -817,6 +882,7 @@ bool FFmpegVideoDecoder::initialize(PDECODER_PARAMETERS params)
     // - AV_PIX_FMT_DRM_PRIME
     // - AV_PIX_FMT_MMAL
     // - AV_PIX_FMT_YUV420P
+    // - AV_PIX_FMT_YUVJ420P
     // - AV_PIX_FMT_NV12
     // - AV_PIX_FMT_NV21
     {
@@ -1049,15 +1115,16 @@ void FFmpegVideoDecoder::decoderThreadProc()
                     frame->pkt_dts = SDL_GetTicks();
 
                     if (!m_FrameInfoQueue.isEmpty()) {
-                        FrameInfoTuple infoTuple = m_FrameInfoQueue.dequeue();
+                        // Data buffers in the DU are not valid here!
+                        DECODE_UNIT du = m_FrameInfoQueue.dequeue();
 
                         // Count time in avcodec_send_packet() and avcodec_receive_frame()
                         // as time spent decoding. Also count time spent in the decode unit
                         // queue because that's directly caused by decoder latency.
-                        m_ActiveWndVideoStats.totalDecodeTime += LiGetMillis() - infoTuple.enqueueTimeMs;
+                        m_ActiveWndVideoStats.totalDecodeTime += LiGetMillis() - du.enqueueTimeMs;
 
                         // Store the presentation time
-                        frame->pts = infoTuple.presentationTimeMs;
+                        frame->pts = du.presentationTimeMs;
                     }
 
                     m_ActiveWndVideoStats.decodedFrames++;
@@ -1082,9 +1149,14 @@ void FFmpegVideoDecoder::decoderThreadProc()
                 }
                 else {
                     char errorstring[512];
+
+                    // FIXME: Should we pop an entry off m_FrameInfoQueue here?
+
                     av_strerror(err, errorstring, sizeof(errorstring));
                     SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
-                                "avcodec_receive_frame() failed: %s", errorstring);
+                                "avcodec_receive_frame() failed: %s (frame %d)",
+                                errorstring,
+                                !m_FrameInfoQueue.isEmpty() ? m_FrameInfoQueue.head().frameNumber : -1);
 
                     if (++m_ConsecutiveFailedDecodes == FAILED_DECODES_RESET_THRESHOLD) {
                         SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
@@ -1097,6 +1169,10 @@ void FFmpegVideoDecoder::decoderThreadProc()
                         // Don't consume any additional data
                         SDL_AtomicSet(&m_DecoderThreadShouldQuit, 1);
                     }
+
+                    // Just in case the error resulted in the loss of the frame,
+                    // request an IDR frame to reset our decoder state.
+                    LiRequestIdrFrame();
                 }
             } while (err == AVERROR(EAGAIN) && !SDL_AtomicGet(&m_DecoderThreadShouldQuit));
 
@@ -1117,11 +1193,6 @@ int FFmpegVideoDecoder::submitDecodeUnit(PDECODE_UNIT du)
 
     // If this is the first frame, reject anything that's not an IDR frame
     if (m_FramesIn == 0 && du->frameType != FRAME_TYPE_IDR) {
-        return DR_NEED_IDR;
-    }
-
-    // Bail immediately if we need an IDR frame to continue
-    if (Session::get()->getAndClearPendingIdrFrameStatus()) {
         return DR_NEED_IDR;
     }
 
@@ -1192,7 +1263,9 @@ int FFmpegVideoDecoder::submitDecodeUnit(PDECODE_UNIT du)
         char errorstring[512];
         av_strerror(err, errorstring, sizeof(errorstring));
         SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
-                    "avcodec_send_packet() failed: %s", errorstring);
+                    "avcodec_send_packet() failed: %s (frame %d)",
+                    errorstring,
+                    du->frameNumber);
 
         // If we've failed a bunch of decodes in a row, the decoder/renderer is
         // clearly unhealthy, so let's generate a synthetic reset event to trigger
@@ -1212,7 +1285,7 @@ int FFmpegVideoDecoder::submitDecodeUnit(PDECODE_UNIT du)
         return DR_NEED_IDR;
     }
 
-    m_FrameInfoQueue.enqueue({ du->enqueueTimeMs, du->presentationTimeMs});
+    m_FrameInfoQueue.enqueue(*du);
 
     m_FramesIn++;
     return DR_OK;

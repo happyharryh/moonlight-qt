@@ -34,7 +34,7 @@ extern "C" {
 class VAAPIRenderer : public IFFmpegRenderer
 {
 public:
-    VAAPIRenderer();
+    VAAPIRenderer(int decoderSelectionPass);
     virtual ~VAAPIRenderer() override;
     virtual bool initialize(PDECODER_PARAMETERS params) override;
     virtual bool prepareDecoderContext(AVCodecContext* context, AVDictionary** options) override;
@@ -42,6 +42,7 @@ public:
     virtual bool needsTestFrame() override;
     virtual bool isDirectRenderingSupported() override;
     virtual int getDecoderColorspace() override;
+    virtual int getDecoderCapabilities() override;
     virtual void notifyOverlayUpdated(Overlay::OverlayType) override;
 
 #ifdef HAVE_EGL
@@ -66,9 +67,11 @@ private:
     bool canExportSurfaceHandle(int layerTypeFlag);
 #endif
 
+    int m_DecoderSelectionPass;
     int m_WindowSystem;
     AVBufferRef* m_HwContext;
     bool m_BlacklistedForDirectRendering;
+    bool m_HasRfiLatencyBug;
 
     SDL_mutex* m_OverlayMutex;
     VAImageFormat m_OverlayFormat;

@@ -45,8 +45,6 @@ public:
 
     void flushWindowEvents();
 
-    bool getAndClearPendingIdrFrameStatus();
-
 signals:
     void stageStarting(QString stage);
 
@@ -156,14 +154,12 @@ private:
     SDL_Window* m_Window;
     IVideoDecoder* m_VideoDecoder;
     SDL_SpinLock m_DecoderLock;
-    SDL_atomic_t m_NeedsIdr;
     bool m_AudioDisabled;
     bool m_AudioMuted;
     Uint32 m_FullScreenFlag;
     int m_DisplayOriginX;
     int m_DisplayOriginY;
     bool m_ThreadedExec;
-    bool m_PendingWindowedTransition;
     bool m_UnexpectedTermination;
     SdlInputHandler* m_InputHandler;
     int m_MouseEmulationRefCount;

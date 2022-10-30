@@ -22,6 +22,7 @@ public:
     virtual void notifyOverlayUpdated(Overlay::OverlayType) override;
     virtual void setHdrMode(bool enabled) override;
     virtual int getRendererAttributes() override;
+    virtual int getDecoderCapabilities() override;
     virtual bool needsTestFrame() override;
 
 private:
@@ -29,7 +30,7 @@ private:
     static void unlockContext(void* lock_ctx);
 
     bool setupRenderingResources();
-    bool setupTexturePoolViews(AVD3D11VAFramesContext* frameContext);
+    bool setupVideoTexture();
     void renderOverlay(Overlay::OverlayType type);
     void bindColorConversion(AVFrame* frame);
     void renderVideo(AVFrame* frame);
@@ -49,8 +50,8 @@ private:
     int m_TextureAlignment;
     int m_DisplayWidth;
     int m_DisplayHeight;
-    AVColorSpace m_LastColorSpace;
-    AVColorRange m_LastColorRange;
+    int m_LastColorSpace;
+    bool m_LastFullRange;
 
     bool m_AllowTearing;
 
@@ -59,8 +60,8 @@ private:
     ID3D11PixelShader* m_VideoBt2020LimPixelShader;
     ID3D11Buffer* m_VideoVertexBuffer;
 
-#define DECODER_BUFFER_POOL_SIZE 17
-    ID3D11ShaderResourceView* m_VideoTextureResourceViews[DECODER_BUFFER_POOL_SIZE][2];
+    ID3D11Texture2D* m_VideoTexture;
+    ID3D11ShaderResourceView* m_VideoTextureResourceViews[2];
 
     SDL_SpinLock m_OverlayLock;
     ID3D11Buffer* m_OverlayVertexBuffers[Overlay::OverlayMax];

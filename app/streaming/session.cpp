@@ -23,6 +23,19 @@
 #define ICON_SIZE 64
 #endif
 
+// HACK: Remove once proper Dark Mode support lands in SDL
+#ifdef Q_OS_WIN32
+#include <SDL_syswm.h>
+#include <dwmapi.h>
+#ifndef DWMWA_USE_IMMERSIVE_DARK_MODE_OLD
+#define DWMWA_USE_IMMERSIVE_DARK_MODE_OLD 19
+#endif
+#ifndef DWMWA_USE_IMMERSIVE_DARK_MODE
+#define DWMWA_USE_IMMERSIVE_DARK_MODE 20
+#endif
+#endif
+
+
 #define SDL_CODE_FLUSH_WINDOW_EVENT_BARRIER 100
 #define SDL_CODE_GAMECONTROLLER_RUMBLE 101
 
@@ -36,6 +49,7 @@
 #include <QImage>
 #include <QGuiApplication>
 #include <QCursor>
+#include <QWindow>
 
 #define CONN_TEST_SERVER "qt.conntest.moonlight-stream.org"
 
@@ -98,11 +112,18 @@ void Session::clConnectionTerminated(int errorCode)
         emit s_ActiveSession->displayLaunchError(tr("Your network connection isn't performing well. Reduce your video bitrate setting or try a faster connection."));
         break;
 
+    case ML_ERROR_PROTECTED_CONTENT:
     case ML_ERROR_UNEXPECTED_EARLY_TERMINATION:
         s_ActiveSession->m_UnexpectedTermination = true;
         emit s_ActiveSession->displayLaunchError(tr("Something went wrong on your host PC when starting the stream.") + "\n\n" +
                                                  tr("Make sure you don't have any DRM-protected content open on your host PC. You can also try restarting your host PC.") + "\n\n" +
                                                  tr("If the issue persists, try reinstalling your GPU drivers and GeForce Experience."));
+        break;
+
+    case ML_ERROR_FRAME_CONVERSION:
+        s_ActiveSession->m_UnexpectedTermination = true;
+        emit s_ActiveSession->displayLaunchError(tr("The host PC reported a fatal video encoding error.") + "\n\n" +
+                                                 tr("Try disabling HDR mode, changing the streaming resolution, or changing your host PC's display resolution."));
         break;
 
     default:
@@ -285,13 +306,8 @@ int Session::drSubmitDecodeUnit(PDECODE_UNIT du)
     // We need to destroy the decoder on the main thread to satisfy
     // some API constraints (like DXVA2). If we can't acquire it,
     // that means the decoder is about to be destroyed, so we can
-    // safely return DR_OK and wait for m_NeedsIdr to be set by
+    // safely return DR_OK and wait for the IDR frame request by
     // the decoder reinitialization code.
-
-    if (s_ActiveSession->getAndClearPendingIdrFrameStatus()) {
-        // If we reset our decoder, we'll need to request an IDR frame
-        return DR_NEED_IDR;
-    }
 
     if (SDL_AtomicTryLock(&s_ActiveSession->m_DecoderLock)) {
         IVideoDecoder* decoder = s_ActiveSession->m_VideoDecoder;
@@ -425,8 +441,7 @@ bool Session::populateDecoderProperties(SDL_Window* window)
                         m_StreamConfig.colorRange);
         }
         else {
-            // Limited is the default for GFE
-            m_StreamConfig.colorRange = COLOR_RANGE_LIMITED;
+            m_StreamConfig.colorRange = decoder->getDecoderColorRange();
         }
     }
 
@@ -451,7 +466,6 @@ Session::Session(NvComputer* computer, NvApp& app, StreamingPreferences *prefere
       m_AudioMuted(false),
       m_DisplayOriginX(0),
       m_DisplayOriginY(0),
-      m_PendingWindowedTransition(false),
       m_UnexpectedTermination(true), // Failure prior to streaming is unexpected
       m_InputHandler(nullptr),
       m_MouseEmulationRefCount(0),
@@ -463,7 +477,6 @@ Session::Session(NvComputer* computer, NvApp& app, StreamingPreferences *prefere
       m_AudioSampleCount(0),
       m_DropAudioEndTime(0)
 {
-    SDL_AtomicSet(&m_NeedsIdr, 0);
 }
 
 bool Session::initialize()
@@ -803,8 +816,13 @@ bool Session::validateLaunch(SDL_Window* testWindow)
         emitLaunchWarning(tr("An attached gamepad has no mapping and won't be usable. Visit the Moonlight help to resolve this."));
     }
 
-    // NVENC will fail to initialize when using dimensions over 4096 and H.264.
-    if (m_StreamConfig.width > 4096 || m_StreamConfig.height > 4096) {
+    // NVENC will fail to initialize when any dimension exceeds 4096 using:
+    // - H.264 on all versions of NVENC
+    // - HEVC prior to Pascal
+    //
+    // However, if we aren't using Nvidia hosting software, don't assume anything about
+    // encoding capabilities by using HEVC Main 10 support. It will likely be wrong.
+    if ((m_StreamConfig.width > 4096 || m_StreamConfig.height > 4096) && m_Computer->isNvidiaServerSoftware) {
         // Pascal added support for 8K HEVC encoding support. Maxwell 2 could encode HEVC but only up to 4K.
         // We can't directly identify Pascal, but we can look for HEVC Main10 which was added in the same generation.
         if (m_Computer->maxLumaPixelsHEVC == 0 || !(m_Computer->serverCodecModeSupport & 0x200)) {
@@ -903,12 +921,10 @@ void Session::getWindowDimensions(int& x, int& y,
                                   int& width, int& height)
 {
     int displayIndex = 0;
-    bool fullScreen;
 
     if (m_Window != nullptr) {
         displayIndex = SDL_GetWindowDisplayIndex(m_Window);
         SDL_assert(displayIndex >= 0);
-        fullScreen = (SDL_GetWindowFlags(m_Window) & SDL_WINDOW_FULLSCREEN);
     }
     // Create our window on the same display that Qt's UI
     // was being displayed on.
@@ -935,38 +951,32 @@ void Session::getWindowDimensions(int& x, int& y,
                             i, SDL_GetError());
             }
         }
-
-        fullScreen = m_IsFullScreen;
     }
 
     SDL_Rect usableBounds;
-    if (fullScreen && SDL_GetDisplayBounds(displayIndex, &usableBounds) == 0) {
-        width = usableBounds.w;
-        height = usableBounds.h;
-    }
-    else if (SDL_GetDisplayUsableBounds(displayIndex, &usableBounds) == 0) {
-        width = usableBounds.w;
-        height = usableBounds.h;
+    if (SDL_GetDisplayUsableBounds(displayIndex, &usableBounds) == 0) {
+        // Don't use more than 80% of the display to leave room for system UI
+        // and ensure the target size is not odd (otherwise one of the sides
+        // of the image will have a one-pixel black bar next to it).
+        SDL_Rect src, dst;
+        src.x = src.y = dst.x = dst.y = 0;
+        src.w = m_StreamConfig.width;
+        src.h = m_StreamConfig.height;
+        dst.w = ((int)SDL_ceilf(usableBounds.w * 0.80f) & ~0x1);
+        dst.h = ((int)SDL_ceilf(usableBounds.h * 0.80f) & ~0x1);
 
-        if (m_Window != nullptr) {
-            int top, left, bottom, right;
+        // Scale the window size while preserving aspect ratio
+        StreamUtils::scaleSourceToDestinationSurface(&src, &dst);
 
-            if (SDL_GetWindowBordersSize(m_Window, &top, &left, &bottom, &right) == 0) {
-                width -= left + right;
-                height -= top + bottom;
-            }
-            else {
-                SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
-                            "Unable to get window border size: %s",
-                            SDL_GetError());
-            }
-
-            // If the stream window can fit within the usable drawing area with 1:1
-            // scaling, do that rather than filling the screen.
-            if (m_StreamConfig.width < width && m_StreamConfig.height < height) {
-                width = m_StreamConfig.width;
-                height = m_StreamConfig.height;
-            }
+        // If the stream window can fit within the usable drawing area with 1:1
+        // scaling, do that rather than filling the screen.
+        if (m_StreamConfig.width < dst.w && m_StreamConfig.height < dst.h) {
+            width = m_StreamConfig.width;
+            height = m_StreamConfig.height;
+        }
+        else {
+            width = dst.w;
+            height = dst.h;
         }
     }
     else {
@@ -1084,17 +1094,20 @@ void Session::toggleFullscreen()
     SDL_AtomicUnlock(&m_DecoderLock);
 #endif
 
-    if (fullScreen) {
-        SDL_SetWindowResizable(m_Window, SDL_FALSE);
-        SDL_SetWindowFullscreen(m_Window, m_FullScreenFlag);
-    }
-    else {
-        SDL_SetWindowFullscreen(m_Window, 0);
-        SDL_SetWindowResizable(m_Window, SDL_TRUE);
+    // Actually enter/leave fullscreen
+    SDL_SetWindowFullscreen(m_Window, fullScreen ? m_FullScreenFlag : 0);
 
-        // Reposition the window when the resize is complete
-        m_PendingWindowedTransition = true;
+#ifdef Q_OS_DARWIN
+    // SDL on macOS has a bug that causes the window size to be reset to crazy
+    // large dimensions when exiting out of true fullscreen mode. We can work
+    // around the issue by manually resetting the position and size here.
+    if (!fullScreen && m_FullScreenFlag == SDL_WINDOW_FULLSCREEN) {
+        int x, y, width, height;
+        getWindowDimensions(x, y, width, height);
+        SDL_SetWindowSize(m_Window, width, height);
+        SDL_SetWindowPosition(m_Window, x, y);
     }
+#endif
 
     // Input handler might need to start/stop keyboard grab after changing modes
     m_InputHandler->updateKeyboardGrabState();
@@ -1264,11 +1277,6 @@ void Session::flushWindowEvents()
     SDL_PushEvent(&flushEvent);
 }
 
-bool Session::getAndClearPendingIdrFrameStatus()
-{
-    return SDL_AtomicSet(&m_NeedsIdr, 0);
-}
-
 class ExecThread : public QThread
 {
 public:
@@ -1393,12 +1401,15 @@ void Session::execInternal()
     SDL_GL_SetAttribute(SDL_GL_GREEN_SIZE, 8);
     SDL_GL_SetAttribute(SDL_GL_BLUE_SIZE, 8);
 
+    // We always want a resizable window with High DPI enabled
+    const Uint32 defaultWindowFlags = SDL_WINDOW_ALLOW_HIGHDPI | SDL_WINDOW_RESIZABLE;
+
     m_Window = SDL_CreateWindow("Moonlight",
                                 x,
                                 y,
                                 width,
                                 height,
-                                SDL_WINDOW_ALLOW_HIGHDPI | StreamUtils::getPlatformWindowFlags());
+                                defaultWindowFlags | StreamUtils::getPlatformWindowFlags());
     if (!m_Window) {
         SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
                     "SDL_CreateWindow() failed with platform flags: %s",
@@ -1409,7 +1420,7 @@ void Session::execInternal()
                                     y,
                                     width,
                                     height,
-                                    SDL_WINDOW_ALLOW_HIGHDPI);
+                                    defaultWindowFlags);
         if (!m_Window) {
             SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
                          "SDL_CreateWindow() failed: %s",
@@ -1422,6 +1433,52 @@ void Session::execInternal()
             return;
         }
     }
+
+    // HACK: Remove once proper Dark Mode support lands in SDL
+#ifdef Q_OS_WIN32
+    {
+        BOOL darkModeEnabled = FALSE;
+
+        // Query whether dark mode is enabled for our Qt window (which tracks the OS dark mode state)
+        QWindowList windows = QGuiApplication::topLevelWindows();
+        for (const QWindow* window : windows) {
+            if (SUCCEEDED(DwmGetWindowAttribute((HWND)window->winId(), DWMWA_USE_IMMERSIVE_DARK_MODE, &darkModeEnabled, sizeof(darkModeEnabled))) ||
+                    SUCCEEDED(DwmGetWindowAttribute((HWND)window->winId(), DWMWA_USE_IMMERSIVE_DARK_MODE_OLD, &darkModeEnabled, sizeof(darkModeEnabled)))) {
+                break;
+            }
+        }
+
+        SDL_SysWMinfo info;
+        SDL_VERSION(&info.version);
+
+        if (SDL_GetWindowWMInfo(m_Window, &info) && info.subsystem == SDL_SYSWM_WINDOWS) {
+            RECT clientRect;
+            HBRUSH blackBrush;
+
+            // Draw a black background (otherwise our window will be bright white).
+            //
+            // TODO: Remove when SDL does this itself
+            blackBrush = CreateSolidBrush(0);
+            GetClientRect(info.info.win.window, &clientRect);
+            FillRect(info.info.win.hdc, &clientRect, blackBrush);
+            DeleteObject(blackBrush);
+
+            // If dark mode is enabled, propagate that to our SDL window
+            if (darkModeEnabled) {
+                if (FAILED(DwmSetWindowAttribute(info.info.win.window, DWMWA_USE_IMMERSIVE_DARK_MODE, &darkModeEnabled, sizeof(darkModeEnabled)))) {
+                    DwmSetWindowAttribute(info.info.win.window, DWMWA_USE_IMMERSIVE_DARK_MODE_OLD, &darkModeEnabled, sizeof(darkModeEnabled));
+                }
+
+                // Toggle non-client rendering off and back on to ensure dark mode takes effect on Windows 10.
+                // DWM doesn't seem to correctly invalidate the non-client area after enabling dark mode.
+                DWMNCRENDERINGPOLICY ncPolicy = DWMNCRP_DISABLED;
+                DwmSetWindowAttribute(info.info.win.window, DWMWA_NCRENDERING_POLICY, &ncPolicy, sizeof(ncPolicy));
+                ncPolicy = DWMNCRP_ENABLED;
+                DwmSetWindowAttribute(info.info.win.window, DWMWA_NCRENDERING_POLICY, &ncPolicy, sizeof(ncPolicy));
+            }
+        }
+    }
+#endif
 
     m_InputHandler->setWindow(m_Window);
 
@@ -1446,27 +1503,32 @@ void Session::execInternal()
     }
 #endif
 
-    // For non-full screen windows, call getWindowDimensions()
-    // again after creating a window to allow it to account
-    // for window chrome size.
-    if (!m_IsFullScreen) {
-        getWindowDimensions(x, y, width, height);
+    // Update the window display mode based on our current monitor
+    // for if/when we enter full-screen mode.
+    updateOptimalWindowDisplayMode();
 
-        // We must set the size before the position because centering
-        // won't work unless it knows the final size of the window.
-        SDL_SetWindowSize(m_Window, width, height);
-        SDL_SetWindowPosition(m_Window, x, y);
-
-        // Passing SDL_WINDOW_RESIZABLE to set this during window
-        // creation causes our window to be full screen for some reason
-        SDL_SetWindowResizable(m_Window, SDL_TRUE);
-    }
-    else {
-        // Update the window display mode based on our current monitor
-        updateOptimalWindowDisplayMode();
-
-        // Enter full screen
+    // Enter full screen if requested
+    if (m_IsFullScreen) {
         SDL_SetWindowFullscreen(m_Window, m_FullScreenFlag);
+
+#ifdef Q_OS_WIN32
+        SDL_SysWMinfo info;
+        SDL_VERSION(&info.version);
+
+        // Draw a black background again after entering full-screen to avoid visual artifacts
+        // where the old window decorations were before.
+        //
+        // TODO: Remove when SDL does this itself
+        if (SDL_GetWindowWMInfo(m_Window, &info) && info.subsystem == SDL_SYSWM_WINDOWS) {
+            RECT clientRect;
+            HBRUSH blackBrush;
+
+            blackBrush = CreateSolidBrush(0);
+            GetClientRect(info.info.win.window, &clientRect);
+            FillRect(info.info.win.hdc, &clientRect, blackBrush);
+            DeleteObject(blackBrush);
+        }
+#endif
     }
 
     bool needsFirstEnterCapture = false;
@@ -1641,20 +1703,6 @@ void Session::execInternal()
             }
 #endif
 
-            // Complete any repositioning that was deferred until
-            // the resize from full-screen to windowed had completed.
-            // If we try to do this immediately, the resize won't take effect
-            // properly on Windows.
-            if (m_PendingWindowedTransition) {
-                m_PendingWindowedTransition = false;
-
-                int x, y, width, height;
-                getWindowDimensions(x, y, width, height);
-
-                SDL_SetWindowSize(m_Window, width, height);
-                SDL_SetWindowPosition(m_Window, x, y);
-            }
-
             if (m_FlushingWindowEventsRef > 0) {
                 // Ignore window events for renderer reset if flushing
                 SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
@@ -1744,7 +1792,7 @@ void Session::execInternal()
             }
 
             // Request an IDR frame to complete the reset
-            SDL_AtomicSet(&m_NeedsIdr, 1);
+            LiRequestIdrFrame();
 
             // Set HDR mode. We may miss the callback if we're in the middle
             // of recreating our decoder at the time the HDR transition happens.

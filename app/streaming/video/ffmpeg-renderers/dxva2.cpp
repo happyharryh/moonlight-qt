@@ -589,7 +589,7 @@ bool DXVA2Renderer::initializeDevice(SDL_Window* window, bool enableVsync)
         d3dpp.BackBufferHeight = currentMode.Height;
         d3dpp.FullScreen_RefreshRateInHz = currentMode.RefreshRate;
 
-        if (m_VideoFormat == VIDEO_FORMAT_H265_MAIN10) {
+        if (m_VideoFormat & VIDEO_FORMAT_MASK_10BIT) {
             d3dpp.BackBufferFormat = currentMode.Format = D3DFMT_A2R10G10B10;
         }
         else {
@@ -751,7 +751,7 @@ bool DXVA2Renderer::initialize(PDECODER_PARAMETERS params)
     m_Desc.SampleFormat.VideoTransferFunction = DXVA2_VideoTransFunc_Unknown;
     m_Desc.SampleFormat.SampleFormat = DXVA2_SampleProgressiveFrame;
 
-    if (m_VideoFormat == VIDEO_FORMAT_H265_MAIN10) {
+    if (m_VideoFormat & VIDEO_FORMAT_MASK_10BIT) {
         m_Desc.Format = (D3DFORMAT)MAKEFOURCC('P','0','1','0');
     }
     else {
@@ -1004,22 +1004,17 @@ int DXVA2Renderer::getDecoderColorspace()
     }
 }
 
+int DXVA2Renderer::getDecoderCapabilities()
+{
+    return CAPABILITY_REFERENCE_FRAME_INVALIDATION_HEVC;
+}
+
 void DXVA2Renderer::renderFrame(AVFrame *frame)
 {
     IDirect3DSurface9* surface = reinterpret_cast<IDirect3DSurface9*>(frame->data[3]);
     HRESULT hr;
 
-    switch (frame->color_range) {
-    case AVCOL_RANGE_JPEG:
-        m_Desc.SampleFormat.NominalRange = DXVA2_NominalRange_0_255;
-        break;
-    case AVCOL_RANGE_MPEG:
-        m_Desc.SampleFormat.NominalRange = DXVA2_NominalRange_16_235;
-        break;
-    default:
-        m_Desc.SampleFormat.NominalRange = DXVA2_NominalRange_Unknown;
-        break;
-    }
+    m_Desc.SampleFormat.NominalRange = isFrameFullRange(frame) ? DXVA2_NominalRange_0_255 : DXVA2_NominalRange_16_235;
 
     switch (frame->color_primaries) {
     case AVCOL_PRI_BT709:
@@ -1067,16 +1062,12 @@ void DXVA2Renderer::renderFrame(AVFrame *frame)
         break;
     }
 
-    switch (frame->colorspace) {
-    case AVCOL_SPC_BT709:
+    switch (getFrameColorspace(frame)) {
+    case COLORSPACE_REC_709:
         m_Desc.SampleFormat.VideoTransferMatrix = DXVA2_VideoTransferMatrix_BT709;
         break;
-    case AVCOL_SPC_BT470BG:
-    case AVCOL_SPC_SMPTE170M:
+    case COLORSPACE_REC_601:
         m_Desc.SampleFormat.VideoTransferMatrix = DXVA2_VideoTransferMatrix_BT601;
-        break;
-    case AVCOL_SPC_SMPTE240M:
-        m_Desc.SampleFormat.VideoTransferMatrix = DXVA2_VideoTransferMatrix_SMPTE240M;
         break;
     default:
         m_Desc.SampleFormat.VideoTransferMatrix = DXVA2_VideoTransferMatrix_Unknown;

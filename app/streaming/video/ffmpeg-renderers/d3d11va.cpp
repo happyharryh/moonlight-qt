@@ -80,13 +80,14 @@ D3D11VARenderer::D3D11VARenderer(int decoderSelectionPass)
       m_SwapChain(nullptr),
       m_DeviceContext(nullptr),
       m_RenderTargetView(nullptr),
-      m_LastColorSpace(AVCOL_SPC_UNSPECIFIED),
-      m_LastColorRange(AVCOL_RANGE_UNSPECIFIED),
+      m_LastColorSpace(-1),
+      m_LastFullRange(false),
       m_AllowTearing(false),
       m_VideoGenericPixelShader(nullptr),
       m_VideoBt601LimPixelShader(nullptr),
       m_VideoBt2020LimPixelShader(nullptr),
       m_VideoVertexBuffer(nullptr),
+      m_VideoTexture(nullptr),
       m_OverlayLock(0),
       m_OverlayPixelShader(nullptr),
       m_HwDeviceContext(nullptr),
@@ -114,9 +115,10 @@ D3D11VARenderer::~D3D11VARenderer()
     SAFE_COM_RELEASE(m_VideoGenericPixelShader);
 
     for (int i = 0; i < ARRAYSIZE(m_VideoTextureResourceViews); i++) {
-        SAFE_COM_RELEASE(m_VideoTextureResourceViews[i][0]);
-        SAFE_COM_RELEASE(m_VideoTextureResourceViews[i][1]);
+        SAFE_COM_RELEASE(m_VideoTextureResourceViews[i]);
     }
+
+    SAFE_COM_RELEASE(m_VideoTexture);
 
     for (int i = 0; i < ARRAYSIZE(m_OverlayVertexBuffers); i++) {
         SAFE_COM_RELEASE(m_OverlayVertexBuffers[i]);
@@ -459,12 +461,11 @@ bool D3D11VARenderer::initialize(PDECODER_PARAMETERS params)
         framesContext->height = FFALIGN(params->height, m_TextureAlignment);
 
         // We can have up to 16 reference frames plus a working surface
-        framesContext->initial_pool_size = DECODER_BUFFER_POOL_SIZE;
+        framesContext->initial_pool_size = 17;
 
         AVD3D11VAFramesContext* d3d11vaFramesContext = (AVD3D11VAFramesContext*)framesContext->hwctx;
 
-        // We need to override the default D3D11VA bind flags to bind the textures as a shader resources
-        d3d11vaFramesContext->BindFlags = D3D11_BIND_DECODER | D3D11_BIND_SHADER_RESOURCE;
+        d3d11vaFramesContext->BindFlags = D3D11_BIND_DECODER;
 
         int err = av_hwframe_ctx_init(m_HwFramesContext);
         if (err < 0) {
@@ -474,8 +475,8 @@ bool D3D11VARenderer::initialize(PDECODER_PARAMETERS params)
             return false;
         }
 
-        // Create SRVs for all textures in the decoder pool
-        if (!setupTexturePoolViews(d3d11vaFramesContext)) {
+        // Create our video texture and SRVs
+        if (!setupVideoTexture()) {
             return false;
         }
     }
@@ -673,11 +674,14 @@ void D3D11VARenderer::renderOverlay(Overlay::OverlayType type)
 
 void D3D11VARenderer::bindColorConversion(AVFrame* frame)
 {
+    bool fullRange = isFrameFullRange(frame);
+    int colorspace = getFrameColorspace(frame);
+
     // We have purpose-built shaders for the common Rec 601 (SDR) and Rec 2020 (HDR) cases
-    if (frame->color_range == AVCOL_RANGE_MPEG && frame->colorspace == AVCOL_SPC_SMPTE170M) {
+    if (!fullRange && colorspace == COLORSPACE_REC_601) {
         m_DeviceContext->PSSetShader(m_VideoBt601LimPixelShader, nullptr, 0);
     }
-    else if (frame->color_range == AVCOL_RANGE_MPEG && frame->colorspace == AVCOL_SPC_BT2020_NCL) {
+    else if (!fullRange && colorspace == COLORSPACE_REC_2020) {
         m_DeviceContext->PSSetShader(m_VideoBt2020LimPixelShader, nullptr, 0);
     }
     else {
@@ -685,14 +689,14 @@ void D3D11VARenderer::bindColorConversion(AVFrame* frame)
         m_DeviceContext->PSSetShader(m_VideoGenericPixelShader, nullptr, 0);
 
         // If nothing has changed since last frame, we're done
-        if (frame->colorspace == m_LastColorSpace && frame->color_range == m_LastColorRange) {
+        if (colorspace == m_LastColorSpace && fullRange == m_LastFullRange) {
             return;
         }
 
         SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
-                    "Falling back to generic video pixel shader for %d:%d",
-                    frame->colorspace,
-                    frame->color_range);
+                    "Falling back to generic video pixel shader for %d (%s range)",
+                    colorspace,
+                    fullRange ? "full" : "limited");
 
         D3D11_BUFFER_DESC constDesc = {};
         constDesc.ByteWidth = sizeof(CSC_CONST_BUF);
@@ -701,41 +705,21 @@ void D3D11VARenderer::bindColorConversion(AVFrame* frame)
         constDesc.CPUAccessFlags = 0;
         constDesc.MiscFlags = 0;
 
-        // This handles the case where the color range is unknown,
-        // so that we use Limited color range which is the default
-        // behavior for Moonlight.
         CSC_CONST_BUF constBuf = {};
-        bool fullRange = (frame->color_range == AVCOL_RANGE_JPEG);
         const float* rawCscMatrix;
-        switch (frame->colorspace) {
-        case AVCOL_SPC_SMPTE170M:
-        case AVCOL_SPC_BT470BG:
+        switch (colorspace) {
+        case COLORSPACE_REC_601:
             rawCscMatrix = fullRange ? k_CscMatrix_Bt601Full : k_CscMatrix_Bt601Lim;
             break;
-        case AVCOL_SPC_BT709:
+        case COLORSPACE_REC_709:
             rawCscMatrix = fullRange ? k_CscMatrix_Bt709Full : k_CscMatrix_Bt709Lim;
             break;
-        case AVCOL_SPC_BT2020_NCL:
-        case AVCOL_SPC_BT2020_CL:
+        case COLORSPACE_REC_2020:
             rawCscMatrix = fullRange ? k_CscMatrix_Bt2020Full : k_CscMatrix_Bt2020Lim;
             break;
         default:
-            // Sunshine doesn't always populate this data correctly,
-            // so fallback to assuming they're sending what we asked for.
-            switch (getDecoderColorspace()) {
-            case COLORSPACE_REC_601:
-                rawCscMatrix = fullRange ? k_CscMatrix_Bt601Full : k_CscMatrix_Bt601Lim;
-                break;
-            case COLORSPACE_REC_709:
-                rawCscMatrix = fullRange ? k_CscMatrix_Bt709Full : k_CscMatrix_Bt709Lim;
-                break;
-            case COLORSPACE_REC_2020:
-                rawCscMatrix = fullRange ? k_CscMatrix_Bt2020Full : k_CscMatrix_Bt2020Lim;
-                break;
-            default:
-                SDL_assert(false);
-                return;
-            }
+            SDL_assert(false);
+            return;
         }
 
         // We need to adjust our raw CSC matrix to be column-major and with float3 vectors
@@ -769,8 +753,8 @@ void D3D11VARenderer::bindColorConversion(AVFrame* frame)
         }
     }
 
-    m_LastColorSpace = frame->colorspace;
-    m_LastColorRange = frame->color_range;
+    m_LastColorSpace = colorspace;
+    m_LastFullRange = fullRange;
 }
 
 void D3D11VARenderer::renderVideo(AVFrame* frame)
@@ -780,22 +764,21 @@ void D3D11VARenderer::renderVideo(AVFrame* frame)
     UINT offset = 0;
     m_DeviceContext->IASetVertexBuffers(0, 1, &m_VideoVertexBuffer, &stride, &offset);
 
-    // Our indexing logic depends on a direct mapping into m_VideoTextureResourceViews
-    // based on the texture index provided by FFmpeg.
-    UINT textureIndex = (uintptr_t)frame->data[1];
-    SDL_assert(textureIndex < DECODER_BUFFER_POOL_SIZE);
-    if (textureIndex >= DECODER_BUFFER_POOL_SIZE) {
-        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
-                     "Unexpected texture index: %u",
-                     textureIndex);
-        return;
-    }
+    // Copy this frame (minus alignment padding) into our video texture
+    D3D11_BOX srcBox;
+    srcBox.left = 0;
+    srcBox.top = 0;
+    srcBox.right = m_DecoderParams.width;
+    srcBox.bottom = m_DecoderParams.height;
+    srcBox.front = 0;
+    srcBox.back = 1;
+    m_DeviceContext->CopySubresourceRegion(m_VideoTexture, 0, 0, 0, 0, (ID3D11Resource*)frame->data[0], (int)(intptr_t)frame->data[1], &srcBox);
 
     // Bind our CSC shader (and constant buffer, if required)
     bindColorConversion(frame);
 
     // Bind SRVs for this frame
-    m_DeviceContext->PSSetShaderResources(0, 2, m_VideoTextureResourceViews[textureIndex]);
+    m_DeviceContext->PSSetShaderResources(0, 2, m_VideoTextureResourceViews);
 
     // Draw the video
     m_DeviceContext->DrawIndexed(6, 0, 0);
@@ -1044,6 +1027,11 @@ int D3D11VARenderer::getRendererAttributes()
     return attributes;
 }
 
+int D3D11VARenderer::getDecoderCapabilities()
+{
+    return CAPABILITY_REFERENCE_FRAME_INVALIDATION_HEVC;
+}
+
 bool D3D11VARenderer::needsTestFrame()
 {
     // We can usually determine when D3D11VA will work based on which decoder GUIDs are supported,
@@ -1250,17 +1238,12 @@ bool D3D11VARenderer::setupRenderingResources()
         SDL_FRect renderRect;
         StreamUtils::screenSpaceToNormalizedDeviceCoords(&dst, &renderRect, m_DisplayWidth, m_DisplayHeight);
 
-        // Don't sample from the alignment padding area since that's not part of the video
-        SDL_assert(m_TextureAlignment != 0);
-        float uMax = (float)m_DecoderParams.width / FFALIGN(m_DecoderParams.width, m_TextureAlignment);
-        float vMax = (float)m_DecoderParams.height / FFALIGN(m_DecoderParams.height, m_TextureAlignment);
-
         VERTEX verts[] =
         {
-            {renderRect.x, renderRect.y, 0, vMax},
+            {renderRect.x, renderRect.y, 0, 1.0f},
             {renderRect.x, renderRect.y+renderRect.h, 0, 0},
-            {renderRect.x+renderRect.w, renderRect.y, uMax, vMax},
-            {renderRect.x+renderRect.w, renderRect.y+renderRect.h, uMax, 0},
+            {renderRect.x+renderRect.w, renderRect.y, 1.0f, 1.0f},
+            {renderRect.x+renderRect.w, renderRect.y+renderRect.h, 1.0f, 0},
         };
 
         D3D11_BUFFER_DESC vbDesc = {};
@@ -1328,42 +1311,55 @@ bool D3D11VARenderer::setupRenderingResources()
     return true;
 }
 
-bool D3D11VARenderer::setupTexturePoolViews(AVD3D11VAFramesContext* frameContext)
+bool D3D11VARenderer::setupVideoTexture()
 {
+    HRESULT hr;
+    D3D11_TEXTURE2D_DESC texDesc = {};
+
+    texDesc.Width = m_DecoderParams.width;
+    texDesc.Height = m_DecoderParams.height;
+    texDesc.MipLevels = 1;
+    texDesc.ArraySize = 1;
+    texDesc.Format = (m_DecoderParams.videoFormat & VIDEO_FORMAT_MASK_10BIT) ? DXGI_FORMAT_P010 : DXGI_FORMAT_NV12;
+    texDesc.SampleDesc.Quality = 0;
+    texDesc.SampleDesc.Count = 1;
+    texDesc.Usage = D3D11_USAGE_DEFAULT;
+    texDesc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+    texDesc.CPUAccessFlags = 0;
+    texDesc.MiscFlags = 0;
+
+    hr = m_Device->CreateTexture2D(&texDesc, nullptr, &m_VideoTexture);
+    if (FAILED(hr)) {
+        m_VideoTexture = nullptr;
+        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                     "ID3D11Device::CreateTexture2D() failed: %x",
+                     hr);
+        return false;
+    }
+
+    // Create luminance and chrominance SRVs for each plane of the texture
     D3D11_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
-    srvDesc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2DARRAY;
-    srvDesc.Texture2DArray.MostDetailedMip = 0;
-    srvDesc.Texture2DArray.MipLevels = 1;
-    srvDesc.Texture2DArray.ArraySize = 1;
+    srvDesc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
+    srvDesc.Texture2D.MostDetailedMip = 0;
+    srvDesc.Texture2D.MipLevels = 1;
+    srvDesc.Format = (m_DecoderParams.videoFormat & VIDEO_FORMAT_MASK_10BIT) ? DXGI_FORMAT_R16_UNORM : DXGI_FORMAT_R8_UNORM;
+    hr = m_Device->CreateShaderResourceView(m_VideoTexture, &srvDesc, &m_VideoTextureResourceViews[0]);
+    if (FAILED(hr)) {
+        m_VideoTextureResourceViews[0] = nullptr;
+        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                     "ID3D11Device::CreateShaderResourceView() failed: %x",
+                     hr);
+        return false;
+    }
 
-    // Create luminance and chrominance SRVs for each texture in the pool
-    for (int i = 0; i < DECODER_BUFFER_POOL_SIZE; i++) {
-        HRESULT hr;
-
-        // Our rendering logic depends on the texture index working to map into our SRV array
-        SDL_assert(i == frameContext->texture_infos[i].index);
-
-        srvDesc.Texture2DArray.FirstArraySlice = frameContext->texture_infos[i].index;
-
-        srvDesc.Format = (m_DecoderParams.videoFormat & VIDEO_FORMAT_MASK_10BIT) ? DXGI_FORMAT_R16_UNORM : DXGI_FORMAT_R8_UNORM;
-        hr = m_Device->CreateShaderResourceView(frameContext->texture_infos[i].texture, &srvDesc, &m_VideoTextureResourceViews[i][0]);
-        if (FAILED(hr)) {
-            m_VideoTextureResourceViews[i][0] = nullptr;
-            SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
-                         "ID3D11Device::CreateShaderResourceView() failed: %x",
-                         hr);
-            return false;
-        }
-
-        srvDesc.Format = (m_DecoderParams.videoFormat & VIDEO_FORMAT_MASK_10BIT) ? DXGI_FORMAT_R16G16_UNORM : DXGI_FORMAT_R8G8_UNORM;
-        hr = m_Device->CreateShaderResourceView(frameContext->texture_infos[i].texture, &srvDesc, &m_VideoTextureResourceViews[i][1]);
-        if (FAILED(hr)) {
-            m_VideoTextureResourceViews[i][1] = nullptr;
-            SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
-                         "ID3D11Device::CreateShaderResourceView() failed: %x",
-                         hr);
-            return false;
-        }
+    srvDesc.Format = (m_DecoderParams.videoFormat & VIDEO_FORMAT_MASK_10BIT) ? DXGI_FORMAT_R16G16_UNORM : DXGI_FORMAT_R8G8_UNORM;
+    hr = m_Device->CreateShaderResourceView(m_VideoTexture, &srvDesc, &m_VideoTextureResourceViews[1]);
+    if (FAILED(hr)) {
+        m_VideoTextureResourceViews[1] = nullptr;
+        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                     "ID3D11Device::CreateShaderResourceView() failed: %x",
+                     hr);
+        return false;
     }
 
     return true;

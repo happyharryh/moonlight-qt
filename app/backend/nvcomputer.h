@@ -30,13 +30,13 @@ public:
     setRemoteAddress(QHostAddress);
 
     bool
-    update(NvComputer& that);
+    update(const NvComputer& that);
 
     bool
-    wake();
+    wake() const;
 
     bool
-    isReachableOverVpn();
+    isReachableOverVpn() const;
 
     QVector<NvAddress>
     uniqueAddresses() const;
@@ -83,6 +83,7 @@ public:
     QString uuid;
     QSslCertificate serverCert;
     QVector<NvApp> appList;
+    bool isNvidiaServerSoftware;
 
     // Synchronization
     mutable QReadWriteLock lock;

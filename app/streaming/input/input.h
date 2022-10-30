@@ -31,14 +31,16 @@ struct GamepadState {
 
     Cemuhook::MotionState motionState;
 
-    struct StickCal {
-        struct AxisCal {
-            int center = 0;
-            int min = -32768;
-            int max = 32767;
-        } axisCal[2];
-        unsigned short deadzone = 0;
-    } stickCal[2];
+    struct Calibration {
+        struct Stick {
+            struct Axis {
+                int center = 0;
+                int min = -32768;
+                int max = 32767;
+            } X, Y;
+            unsigned short deadzone = 0;
+        } ls, rs;
+    } cal;
 };
 
 #define MAX_GAMEPADS 4

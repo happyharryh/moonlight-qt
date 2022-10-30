@@ -98,13 +98,13 @@ Uint32 SdlInputHandler::mouseEmulationTimerCallback(Uint32 interval, void *param
 }
 
 static inline
-int16_t calibration(int16_t value, const GamepadState::StickCal::AxisCal& axisCal) {
-    if (value <= axisCal.min)
+short calibration(short value, const GamepadState::Calibration::Stick::Axis& axis) {
+    if (value <= axis.min)
         return -32768;
-    else if (value < axisCal.center)
-        return -32768.0 / (axisCal.center - axisCal.min) * (axisCal.center - value);
-    else if (value < axisCal.max)
-        return 32767.0 / (axisCal.max - axisCal.center) * (value - axisCal.center);
+    else if (value < axis.center)
+        return -32768.0 / (axis.center - axis.min) * (axis.center - value);
+    else if (value < axis.max)
+        return 32767.0 / (axis.max - axis.center) * (value - axis.center);
     else
         return 32767;
 }
@@ -123,7 +123,7 @@ void SdlInputHandler::handleControllerAxisEvent(SDL_ControllerAxisEvent* event)
         switch (event->axis)
         {
             case SDL_CONTROLLER_AXIS_LEFTX:
-                state->lsX = calibration(event->value, state->stickCal[0].axisCal[0]);
+                state->lsX = calibration(event->value, state->cal.ls.X);
                 break;
             case SDL_CONTROLLER_AXIS_LEFTY:
                 // Signed values have one more negative value than
@@ -131,13 +131,13 @@ void SdlInputHandler::handleControllerAxisEvent(SDL_ControllerAxisEvent* event)
                 // could actually cause the value to overflow and
                 // wrap around to be negative again. Avoid that by
                 // capping the value at 32767.
-                state->lsY = -qMax(calibration(event->value, state->stickCal[0].axisCal[1]), (short)-32767);
+                state->lsY = -qMax(calibration(event->value, state->cal.ls.Y), (short)-32767);
                 break;
             case SDL_CONTROLLER_AXIS_RIGHTX:
-                state->rsX = calibration(event->value, state->stickCal[1].axisCal[0]);
+                state->rsX = calibration(event->value, state->cal.rs.X);
                 break;
             case SDL_CONTROLLER_AXIS_RIGHTY:
-                state->rsY = -qMax(calibration(event->value, state->stickCal[1].axisCal[1]), (short)-32767);
+                state->rsY = -qMax(calibration(event->value, state->cal.rs.Y), (short)-32767);
                 break;
             case SDL_CONTROLLER_AXIS_TRIGGERLEFT:
                 state->lt = (unsigned char)(event->value * 255UL / 32767);
@@ -168,9 +168,9 @@ void SdlInputHandler::handleControllerAxisEvent(SDL_ControllerAxisEvent* event)
     }
 
     // Apply stick deadzone
-    if (qPow(state->lsX, 2) + qPow(state->lsY, 2) < qPow(state->stickCal[0].deadzone, 2))
+    if (qPow(state->lsX, 2) + qPow(state->lsY, 2) < qPow(state->cal.ls.deadzone, 2))
         state->lsX = state->lsY = 0;
-    if (qPow(state->rsX, 2) + qPow(state->rsY, 2) < qPow(state->stickCal[1].deadzone, 2))
+    if (qPow(state->rsX, 2) + qPow(state->rsY, 2) < qPow(state->cal.rs.deadzone, 2))
         state->rsX = state->rsY = 0;
 
     // Only send the gamepad state to the host if it's not in mouse emulation mode
@@ -496,9 +496,10 @@ void SdlInputHandler::handleControllerDeviceEvent(SDL_ControllerDeviceEvent* eve
             }
         }
 
+        state->cal = GamepadState::Calibration();
         QByteArray calibrationStr = qgetenv(QByteArray("STREAM_GAMECONTROLLER_CALIBRATION_GUID_").append(guidStr));
         if (!calibrationStr.isEmpty()) {
-            GamepadState::StickCal stickCal[2] {};
+            GamepadState::Calibration cal {};
 
             bool isCalibrationValid = true;
             for (QByteArray& calibration : calibrationStr.split(',')) {
@@ -508,9 +509,9 @@ void SdlInputHandler::handleControllerDeviceEvent(SDL_ControllerDeviceEvent* eve
                     "(?<stick>[LR])(?:(?<axis>[XY])(?<item>CENTER|MIN|MAX)|DEADZONE):(?<value>-?\\d+)");
                 QRegularExpressionMatch match = re.match(calibration.toUpper());
                 if (match.hasMatch()) {
-                    GamepadState::StickCal& stick = stickCal[match.captured("stick") == 'R'];
+                    GamepadState::Calibration::Stick& stick = match.captured("stick") == 'L' ? cal.ls: cal.rs;
                     if (!match.captured("axis").isEmpty()) {
-                        GamepadState::StickCal::AxisCal& axis = stick.axisCal[match.captured("axis") == 'Y'];
+                        GamepadState::Calibration::Stick::Axis& axis = match.captured("axis") == 'X' ? stick.X : stick.Y;
                         if (match.captured("item") == "CENTER")
                             axis.center = match.captured("value").toInt(&ok);
                         else if (match.captured("item") == "MIN")
@@ -526,20 +527,16 @@ void SdlInputHandler::handleControllerDeviceEvent(SDL_ControllerDeviceEvent* eve
             }
 
             if (isCalibrationValid)
-                for (const GamepadState::StickCal& stick : stickCal)
-                    for (const GamepadState::StickCal::AxisCal& axis : stick.axisCal)
-                        if (!(axis.min < axis.center && axis.center < axis.max))
-                            isCalibrationValid = false;
+                for (GamepadState::Calibration::Stick::Axis* axis : {&cal.ls.X, &cal.ls.Y, &cal.rs.X, &cal.rs.Y})
+                    if (!(axis->min < axis->center && axis->center < axis->max))
+                        isCalibrationValid = false;
 
             if (isCalibrationValid) {
-                memcpy(state->stickCal, stickCal, sizeof(stickCal));
+                memcpy(&state->cal, &cal, sizeof(state->cal));
                 qInfo("Load Calibration Success: %s -> %s", guidStr, calibrationStr.constData());
             } else {
-                std::fill(std::begin(state->stickCal), std::end(state->stickCal), GamepadState::StickCal());
                 qWarning("Load Calibration Fail: %s -> %s", guidStr, calibrationStr.constData());
             }
-        } else {
-            std::fill(std::begin(state->stickCal), std::end(state->stickCal), GamepadState::StickCal());
         }
 
         // Send an empty event to tell the PC we've arrived

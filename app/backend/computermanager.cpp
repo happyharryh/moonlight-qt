@@ -44,7 +44,7 @@ private:
 
         // Ensure the machine that responded is the one we intended to contact
         if (m_Computer->uuid != newState.uuid) {
-            qInfo() << "Found unexpected PC " << newState.name << " looking for " << m_Computer->name;
+            qInfo() << "Found unexpected PC" << newState.name << "looking for" << m_Computer->name;
             return false;
         }
 
@@ -878,7 +878,7 @@ private:
 
                 // If this wasn't added via mDNS but it is a RFC 1918 IPv4 address and not a VPN,
                 // go ahead and do the STUN request now to populate an external address.
-                if (!m_Mdns && addressIsSiteLocalV4 && !newComputer->isReachableOverVpn()) {
+                if (!m_Mdns && addressIsSiteLocalV4 && newComputer->getActiveAddressReachability() != NvComputer::RI_VPN) {
                     quint32 addr;
                     int err = LiFindExternalAddressIP4("stun.moonlight-stream.org", 3478, &addr);
                     if (err == 0) {

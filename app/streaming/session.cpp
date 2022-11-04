@@ -1232,17 +1232,27 @@ bool Session::startConnectionAsync()
                     m_Preferences->packetSize);
     }
     else {
-        // isReachableOverVpn() does network I/O, so we only attempt to check
-        // VPN reachability if we've already contacted the PC successfully
-        if (m_Computer->isReachableOverVpn()) {
-            // It looks like our route to this PC is over a VPN.
+        // Use 1392 byte video packets by default
+        m_StreamConfig.packetSize = 1392;
+
+        // getActiveAddressReachability() does network I/O, so we only attempt to check
+        // reachability if we've already contacted the PC successfully.
+        switch (m_Computer->getActiveAddressReachability()) {
+        case NvComputer::RI_LAN:
+            // This address is on-link, so treat it as a local address
+            // even if it's not in RFC 1918 space or it's an IPv6 address.
+            m_StreamConfig.streamingRemotely = STREAM_CFG_LOCAL;
+            break;
+        case NvComputer::RI_VPN:
+            // It looks like our route to this PC is over a VPN, so cap at 1024 bytes.
             // Treat it as remote even if the target address is in RFC 1918 address space.
             m_StreamConfig.streamingRemotely = STREAM_CFG_REMOTE;
             m_StreamConfig.packetSize = 1024;
-        }
-        else {
+            break;
+        default:
+            // If we don't have reachability info, let moonlight-common-c decide.
             m_StreamConfig.streamingRemotely = STREAM_CFG_AUTO;
-            m_StreamConfig.packetSize = 1392;
+            break;
         }
     }
 
@@ -1402,7 +1412,19 @@ void Session::execInternal()
     SDL_GL_SetAttribute(SDL_GL_BLUE_SIZE, 8);
 
     // We always want a resizable window with High DPI enabled
-    const Uint32 defaultWindowFlags = SDL_WINDOW_ALLOW_HIGHDPI | SDL_WINDOW_RESIZABLE;
+    Uint32 defaultWindowFlags = SDL_WINDOW_ALLOW_HIGHDPI | SDL_WINDOW_RESIZABLE;
+
+    // If we're starting in windowed mode and the Moonlight GUI is maximized,
+    // match that with the streaming window.
+    if (!m_IsFullScreen) {
+        QWindowList windows = QGuiApplication::topLevelWindows();
+        for (const QWindow* window : windows) {
+            if (window->windowState() & Qt::WindowMaximized) {
+                defaultWindowFlags |= SDL_WINDOW_MAXIMIZED;
+                break;
+            }
+        }
+    }
 
     m_Window = SDL_CreateWindow("Moonlight",
                                 x,

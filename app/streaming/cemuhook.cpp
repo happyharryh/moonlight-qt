@@ -15,63 +15,33 @@ const QMap<SDL_JoystickPowerLevel, SharedResponse::Battery> SharedResponse::k_Ba
 };
 
 bool MotionState::updateByControllerSensorEvent(SDL_ControllerSensorEvent* event) {
-    // In SDL 2.24.0, the order of the sensor events may be:
-    //     T1_gyro, T2_gyro, T3_gyro, T1_accel, T2_accel, T3_accel, ...
-    //     (See https://github.com/libsdl-org/SDL/blob/release-2.24.0/src/joystick/hidapi/SDL_hidapi_switch.c#L1999)
-    // The below codes are going to change the order to what we need:
-    //     (T1_accel, T1_gyro), (T2_accel, T2_gyro), (T3_accel, T3_gyro), ...
-    // In the future version of SDL, the order of the sensor events will become:
-    //     T1_gyro, T1_accel, T2_gyro, T2_accel, T3_gyro, T3_accel, ...
-    //     (See PR: https://github.com/libsdl-org/SDL/pull/6373)
-    // After that, the codes here can be simplified.
-    if (event->timestamp != inputTimestamp) {
-        accelIndex = 0;
-        gyroIndex = 0;
-        inputTimestamp = event->timestamp;
+    uint64_t &timestamp = reinterpret_cast<uint64_t &>(motion.timestamp);
+    if (event->timestamp_us != timestamp) {
+        accelUpdated = false;
+        gyroUpdated = false;
+        timestamp = event->timestamp_us;
     }
 
-    DataResponse::MotionData* motion;
-    if (event->sensor == SDL_SENSOR_ACCEL) {
-        motion = &pendingMotionData[accelIndex % 3];
+    if (event->sensor == SDL_SENSOR_ACCEL && !accelUpdated) {
         constexpr float GRAVITY = 9.80665f;
-        motion->accX = - event->data[0] / GRAVITY;
-        motion->accY = - event->data[1] / GRAVITY;
-        motion->accZ = - event->data[2] / GRAVITY;
-        if (++accelIndex > gyroIndex)
-            return false;
-     } else if (event->sensor == SDL_SENSOR_GYRO) {
-        motion = &pendingMotionData[gyroIndex % 3];
+        motion.accX = - event->data[0] / GRAVITY;
+        motion.accY = - event->data[1] / GRAVITY;
+        motion.accZ = - event->data[2] / GRAVITY;
+        accelUpdated = true;
+     } else if (event->sensor == SDL_SENSOR_GYRO && !gyroUpdated) {
         constexpr float PI_FACTOR = 3.1415926535f * 2 / 312.0f;
-        motion->pitch = event->data[0] / PI_FACTOR;
-        motion->yaw = - event->data[1] / PI_FACTOR;
-        motion->roll = - event->data[2] / PI_FACTOR;
-        if (++gyroIndex > accelIndex)
-            return false;
+        motion.pitch = event->data[0] / PI_FACTOR;
+        motion.yaw = - event->data[1] / PI_FACTOR;
+        motion.roll = - event->data[2] / PI_FACTOR;
+        gyroUpdated = true;
     } else {
         SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                    "Unhandled controller sensor: %d",
-                    event->sensor);
+                    "Unhandled controller sensor: %d accelUpdated: %d gyroUpdated: %d",
+                    event->sensor, accelUpdated, gyroUpdated);
         return false;
     }
 
-    // The codes here impliment the feature of this commit in advance:
-    // https://github.com/libsdl-org/SDL/commit/18eb319adcba169c73bff27a13abe8a7ea08b0ff
-    if (sampleTimestamp == 0)
-        sampleTimestamp = SDL_GetTicks();
-
-    constexpr uint32_t SAMPLE_FREQUENCY = 1000;
-    if (++sampleCount >= SAMPLE_FREQUENCY) {
-        uint32_t now = SDL_GetTicks();
-        outputInterval = (now - sampleTimestamp) * 1000 / sampleCount;
-        sampleCount = 0;
-        sampleTimestamp = now;
-    }
-
-    outputTimestamp += outputInterval;
-    reinterpret_cast<uint64_t &>(motion->timestamp) = outputTimestamp;
-    memcpy(&motionData, motion, sizeof(motionData));
-
-    return true;
+    return accelUpdated && gyroUpdated;
 }
 
 void Server::init(const QHostAddress& addr, uint16_t port, QObject *parent) {
@@ -317,7 +287,7 @@ void Server::handleSend(const GamepadState& state) {
     response.aR2 = state.rt;
     response.aL2 = state.lt;
 
-    memcpy(&response.motion, &state.motionState.motionData, sizeof(response.motion));
+    memcpy(&response.motion, &state.motionState.motion, sizeof(response.motion));
 
     for (Client& client : m_Clients) {
         response.packetNumber = client.packetNumber++;

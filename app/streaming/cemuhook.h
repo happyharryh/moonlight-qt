@@ -124,17 +124,10 @@ struct DataResponse {
 
 struct MotionState {
     SharedResponse::DeviceModel deviceModel = SharedResponse::DeviceModel::NOT_APPLICABLE;
-    DataResponse::MotionData motionData;
 
-    DataResponse::MotionData pendingMotionData[3];
-    size_t accelIndex = 0;
-    size_t gyroIndex = 0;
-    uint32_t inputTimestamp = 0;
-
-    uint64_t outputTimestamp = 0;
-    uint64_t outputInterval = 5000;
-    uint32_t sampleTimestamp = 0;
-    uint32_t sampleCount = 0;
+    DataResponse::MotionData motion;
+    bool accelUpdated = false;
+    bool gyroUpdated = false;
 
     bool updateByControllerSensorEvent(SDL_ControllerSensorEvent* event);
 };

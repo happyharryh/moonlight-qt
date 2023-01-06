@@ -134,6 +134,7 @@ public:
     Q_PROPERTY(CaptureSysKeysMode captureSysKeysMode MEMBER captureSysKeysMode NOTIFY captureSysKeysModeChanged)
     Q_PROPERTY(Language language MEMBER language NOTIFY languageChanged)
     Q_PROPERTY(bool combineJoyCons MEMBER combineJoyCons NOTIFY combineJoyConsChanged)
+    Q_PROPERTY(bool verticalJoyCons MEMBER verticalJoyCons NOTIFY verticalJoyConsChanged)
     Q_PROPERTY(bool cemuhookServer MEMBER cemuhookServer NOTIFY cemuhookServerChanged)
     Q_PROPERTY(bool vbanEmitter MEMBER vbanEmitter NOTIFY vbanEmitterChanged);
 
@@ -174,6 +175,7 @@ public:
     Language language;
     CaptureSysKeysMode captureSysKeysMode;
     bool combineJoyCons;
+    bool verticalJoyCons;
     bool cemuhookServer;
     bool vbanEmitter;
 
@@ -208,6 +210,7 @@ signals:
     void keepAwakeChanged();
     void languageChanged();
     void combineJoyConsChanged();
+    void verticalJoyConsChanged();
     void cemuhookServerChanged();
     void vbanEmitterChanged();
 

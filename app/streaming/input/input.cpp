@@ -143,6 +143,9 @@ SdlInputHandler::SdlInputHandler(StreamingPreferences& prefs, NvComputer*, int s
     // SDL_HINT_JOYSTICK_HIDAPI_COMBINE_JOY_CONS.
     SDL_SetHint(SDL_HINT_JOYSTICK_HIDAPI_COMBINE_JOY_CONS, prefs.combineJoyCons ? "1" : "0");
 
+    // SDL_HINT_JOYSTICK_HIDAPI_VERTICAL_JOY_CONS.
+    SDL_SetHint(SDL_HINT_JOYSTICK_HIDAPI_VERTICAL_JOY_CONS, prefs.verticalJoyCons ? "1" : "0");
+
     // We must initialize joystick explicitly before gamecontroller in order
     // to ensure we receive gamecontroller attach events for gamepads where
     // SDL doesn't have a built-in mapping. By starting joystick first, we

@@ -375,6 +375,7 @@ void StreamCommandLineParser::parse(const QStringList &args, StreamingPreference
     parser.addChoiceOption("video-codec", "video codec", m_VideoCodecMap.keys());
     parser.addChoiceOption("video-decoder", "video decoder", m_VideoDecoderMap.keys());
     parser.addToggleOption("combine-joy-cons", "Combine Joy-Con (L) and Joy-Con (R)");
+    parser.addToggleOption("vertical-joy-cons", "Use vertical mode for Joy-Cons");
     parser.addToggleOption("cemuhook-server", "CemuHook Server");
     parser.addToggleOption("vban-emitter", "VBAN Emitter");
 
@@ -505,6 +506,9 @@ void StreamCommandLineParser::parse(const QStringList &args, StreamingPreference
 
     // Resolve --combine-joy-cons and --no-combine-joy-cons options
     preferences->combineJoyCons = parser.getToggleOptionValue("combine-joy-cons", preferences->combineJoyCons);
+
+    // Resolve --vertical-joy-cons and --no-vertical-joy-cons options
+    preferences->verticalJoyCons = parser.getToggleOptionValue("vertical-joy-cons", preferences->verticalJoyCons);
 
     // Resolve --cemuhook-server and --no-cemuhook-server options
     preferences->cemuhookServer = parser.getToggleOptionValue("cemuhook-server", preferences->cemuhookServer);

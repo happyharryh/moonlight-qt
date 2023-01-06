@@ -45,6 +45,7 @@
 #define SER_KEEPAWAKE "keepawake"
 #define SER_LANGUAGE "language"
 #define SER_COMBINEJOYCONS "combinejoycons"
+#define SER_VERTICALJOYCONS "verticaljoycons"
 #define SER_CEMUHOOKSERVER "cemuhookserver"
 #define SER_VBANEMITTER "vbanemitter"
 
@@ -125,6 +126,7 @@ void StreamingPreferences::reload()
     language = static_cast<Language>(settings.value(SER_LANGUAGE,
                                                     static_cast<int>(Language::LANG_AUTO)).toInt());
     combineJoyCons = settings.value(SER_COMBINEJOYCONS, true).toBool();
+    verticalJoyCons = settings.value(SER_VERTICALJOYCONS, false).toBool();
     cemuhookServer = settings.value(SER_CEMUHOOKSERVER, false).toBool();
     vbanEmitter = settings.value(SER_VBANEMITTER, false).toBool();
 
@@ -293,6 +295,7 @@ void StreamingPreferences::save()
     settings.setValue(SER_CAPTURESYSKEYS, captureSysKeysMode);
     settings.setValue(SER_KEEPAWAKE, keepAwake);
     settings.setValue(SER_COMBINEJOYCONS, combineJoyCons);
+    settings.setValue(SER_VERTICALJOYCONS, verticalJoyCons);
     settings.setValue(SER_CEMUHOOKSERVER, cemuhookServer);
     settings.setValue(SER_VBANEMITTER, vbanEmitter);
 }

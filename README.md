@@ -11,7 +11,7 @@ You can follow development on our [Discord server](https://moonlight-stream.org/
  [![Translation Status](https://hosted.weblate.org/widgets/moonlight/-/moonlight-qt/svg-badge.svg)](https://hosted.weblate.org/projects/moonlight/moonlight-qt/)
 
 ## Branch Features
-- Customize the combine mode of Nintendo Joy-Cons in the settings view
+- Customize the combine mode and the vertical mode of Nintendo Joy-Cons in the settings view
 - CemuHook Server: sending the sensor data of game controllers using [CemuHook Protocal](https://github.com/v1993/cemuhook-protocol)
   - Set `ip_of_your_client_pc:26760` as a motion source in your Yuzu/Cemu
   - Enjoy those games which require motion sensor

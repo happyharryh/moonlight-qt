@@ -1253,6 +1253,30 @@ Flickable {
                 }
 
                 CheckBox {
+                    id: verticalJoyConsCheck
+                    width: parent.width
+                    text: qsTr("Use vertical mode for Joy-Cons")
+                    font.pointSize: 12
+                    checked: StreamingPreferences.verticalJoyCons
+                    onCheckedChanged: {
+                        // Check if the value changed (this is called on init too)
+                        if (StreamingPreferences.verticalJoyCons !== checked) {
+                            StreamingPreferences.verticalJoyCons = checked
+
+                            // Save and restart SdlGamepadKeyNavigation so it can pull the new value
+                            StreamingPreferences.save()
+                            SdlGamepadKeyNavigation.disable()
+                            SdlGamepadKeyNavigation.enable()
+                        }
+                    }
+
+                    ToolTip.delay: 1000
+                    ToolTip.timeout: 5000
+                    ToolTip.visible: hovered
+                    ToolTip.text: qsTr("Use vertical mode for Joy-Cons")
+                }
+
+                CheckBox {
                     id: cemuhookServer
                     width: parent.width
                     text: qsTr("Enable CemuHook Server")

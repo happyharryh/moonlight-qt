@@ -301,6 +301,11 @@ int main(int argc, char *argv[])
         Path::initialize(false);
     }
 
+    // Override the default QML cache directory with the one we chose
+    if (qEnvironmentVariableIsEmpty("QML_DISK_CACHE_PATH")) {
+        qputenv("QML_DISK_CACHE_PATH", Path::getQmlCacheDir().toUtf8());
+    }
+
 #ifdef USE_CUSTOM_LOGGER
 #ifdef LOG_TO_FILE
     QDir tempDir(Path::getLogDir());
@@ -324,6 +329,15 @@ int main(int argc, char *argv[])
 #ifdef Q_OS_WIN32
     // Create a crash dump when we crash on Windows
     SetUnhandledExceptionFilter(UnhandledExceptionHandler);
+#endif
+
+#ifdef LOG_TO_FILE
+    // Prune the oldest existing logs if there are more than 10
+    QStringList existingLogNames = tempDir.entryList(QStringList("Moonlight-*.log"), QDir::NoFilter, QDir::SortFlag::Time);
+    for (int i = 10; i < existingLogNames.size(); i++) {
+        qInfo() << "Removing old log file:" << existingLogNames.at(i);
+        QFile(tempDir.filePath(existingLogNames.at(i))).remove();
+    }
 #endif
 
 #if defined(Q_OS_WIN32)
@@ -371,6 +385,11 @@ int main(int argc, char *argv[])
                 qWarning() << "On the Raspberry Pi, you must enable the 'fake KMS' driver in raspi-config to use Moonlight outside of the GUI environment.";
             }
         }
+
+        // EGLFS uses OpenGLES 2.0, so we will too. Some embedded platforms may not
+        // even have working OpenGL implementations, so GLES is the only option.
+        // See https://github.com/moonlight-stream/moonlight-qt/issues/868
+        SDL_SetHint(SDL_HINT_RENDER_DRIVER, "opengles2");
 #endif
     }
 
@@ -621,28 +640,18 @@ int main(int argc, char *argv[])
     // Create the identity manager on the main thread
     IdentityManager::get();
 
-#ifndef Q_OS_WINRT
-    // Use the dense material dark theme by default
-    if (!qEnvironmentVariableIsSet("QT_QUICK_CONTROLS_STYLE")) {
-        qputenv("QT_QUICK_CONTROLS_STYLE", "Material");
-    }
-#else
-    // Use universal dark on WinRT
-    if (!qEnvironmentVariableIsSet("QT_QUICK_CONTROLS_STYLE")) {
-        qputenv("QT_QUICK_CONTROLS_STYLE", "Universal");
-    }
-#endif
-    if (!qEnvironmentVariableIsSet("QT_QUICK_CONTROLS_MATERIAL_THEME")) {
-        qputenv("QT_QUICK_CONTROLS_MATERIAL_THEME", "Dark");
-    }
+    // We require the Material theme
+    QQuickStyle::setStyle("Material");
+
+    // Our icons are styled for a dark theme, so we do not allow the user to override this
+    qputenv("QT_QUICK_CONTROLS_MATERIAL_THEME", "Dark");
+
+    // These are defaults that we allow the user to override
     if (!qEnvironmentVariableIsSet("QT_QUICK_CONTROLS_MATERIAL_ACCENT")) {
         qputenv("QT_QUICK_CONTROLS_MATERIAL_ACCENT", "Purple");
     }
     if (!qEnvironmentVariableIsSet("QT_QUICK_CONTROLS_MATERIAL_VARIANT")) {
         qputenv("QT_QUICK_CONTROLS_MATERIAL_VARIANT", "Dense");
-    }
-    if (!qEnvironmentVariableIsSet("QT_QUICK_CONTROLS_UNIVERSAL_THEME")) {
-        qputenv("QT_QUICK_CONTROLS_UNIVERSAL_THEME", "Dark");
     }
 
     QQmlApplicationEngine engine;

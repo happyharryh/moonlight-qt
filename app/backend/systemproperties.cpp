@@ -2,6 +2,7 @@
 #include "utils.h"
 
 #include <QGuiApplication>
+#include <QLibraryInfo>
 
 #include "streaming/session.h"
 #include "streaming/streamutils.h"
@@ -17,6 +18,7 @@ SystemProperties::SystemProperties()
     hasDesktopEnvironment = WMUtils::isRunningDesktopEnvironment();
     isRunningWayland = WMUtils::isRunningWayland();
     isRunningXWayland = isRunningWayland && QGuiApplication::platformName() == "xcb";
+    usesMaterial3Theme = QLibraryInfo::version() >= QVersionNumber(6, 5, 0);
     QString nativeArch = QSysInfo::currentCpuArchitecture();
 
 #ifdef Q_OS_WIN32
@@ -70,7 +72,7 @@ SystemProperties::SystemProperties()
     // and cache the results to speed up future queries on this data.
     querySdlVideoInfo();
 
-    Q_ASSERT(maximumStreamingFrameRate >= 60);
+    Q_ASSERT(!monitorRefreshRates.isEmpty());
     Q_ASSERT(!monitorNativeResolutions.isEmpty());
 }
 
@@ -78,6 +80,12 @@ QRect SystemProperties::getNativeResolution(int displayIndex)
 {
     // Returns default constructed QRect if out of bounds
     return monitorNativeResolutions.value(displayIndex);
+}
+
+int SystemProperties::getRefreshRate(int displayIndex)
+{
+    // Returns 0 if out of bounds
+    return monitorRefreshRates.value(displayIndex);
 }
 
 class QuerySdlVideoThread : public QThread
@@ -188,9 +196,6 @@ void SystemProperties::refreshDisplaysInternal()
 
     monitorNativeResolutions.clear();
 
-    // Never let the maximum drop below 60 FPS
-    maximumStreamingFrameRate = 60;
-
     SDL_DisplayMode bestMode;
     for (int displayIndex = 0; displayIndex < SDL_GetNumVideoDisplays(); displayIndex++) {
         SDL_DisplayMode desktopMode;
@@ -218,7 +223,17 @@ void SystemProperties::refreshDisplaysInternal()
                 }
             }
 
-            maximumStreamingFrameRate = qMax(maximumStreamingFrameRate, bestMode.refresh_rate);
+            // Try to normalize values around our our standard refresh rates.
+            // Some displays/OSes report values that are slightly off.
+            if (bestMode.refresh_rate >= 58 && bestMode.refresh_rate <= 62) {
+                monitorRefreshRates.append(60);
+            }
+            else if (bestMode.refresh_rate >= 28 && bestMode.refresh_rate <= 32) {
+                monitorRefreshRates.append(30);
+            }
+            else {
+                monitorRefreshRates.append(bestMode.refresh_rate);
+            }
         }
     }
 

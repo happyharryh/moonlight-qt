@@ -187,12 +187,15 @@ NvHTTP::getServerInfo(NvLogLevel logLevel, bool fastFail)
 }
 
 void
-NvHTTP::launchApp(int appId,
-                  PSTREAM_CONFIGURATION streamConfig,
-                  bool sops,
-                  bool localAudio,
-                  int gamepadMask,
-                  QString& rtspSessionUrl)
+NvHTTP::startApp(QString verb,
+                 bool isGfe,
+                 int appId,
+                 PSTREAM_CONFIGURATION streamConfig,
+                 bool sops,
+                 bool localAudio,
+                 int gamepadMask,
+                 bool persistGameControllersOnDisconnect,
+                 QString& rtspSessionUrl)
 {
     int riKeyId;
 
@@ -201,52 +204,29 @@ NvHTTP::launchApp(int appId,
 
     QString response =
             openConnectionToString(m_BaseUrlHttps,
-                                   "launch",
+                                   verb,
                                    "appid="+QString::number(appId)+
                                    "&mode="+QString::number(streamConfig->width)+"x"+
                                    QString::number(streamConfig->height)+"x"+
                                    // Using an FPS value over 60 causes SOPS to default to 720p60,
                                    // so force it to 0 to ensure the correct resolution is set. We
                                    // used to use 60 here but that locked the frame rate to 60 FPS
-                                   // on GFE 3.20.3.
-                                   QString::number(streamConfig->fps > 60 ? 0 : streamConfig->fps)+
+                                   // on GFE 3.20.3. We don't need this hack for Sunshine.
+                                   QString::number((streamConfig->fps > 60 && isGfe) ? 0 : streamConfig->fps)+
                                    "&additionalStates=1&sops="+QString::number(sops ? 1 : 0)+
                                    "&rikey="+QByteArray(streamConfig->remoteInputAesKey, sizeof(streamConfig->remoteInputAesKey)).toHex()+
                                    "&rikeyid="+QString::number(riKeyId)+
-                                   (streamConfig->enableHdr ?
+                                   ((streamConfig->supportedVideoFormats & VIDEO_FORMAT_MASK_10BIT) ?
                                        "&hdrMode=1&clientHdrCapVersion=0&clientHdrCapSupportedFlagsInUint32=0&clientHdrCapMetaDataId=NV_STATIC_METADATA_TYPE_1&clientHdrCapDisplayData=0x0x0x0x0x0x0x0x0x0x0" :
                                         "")+
                                    "&localAudioPlayMode="+QString::number(localAudio ? 1 : 0)+
                                    "&surroundAudioInfo="+QString::number(SURROUNDAUDIOINFO_FROM_AUDIO_CONFIGURATION(streamConfig->audioConfiguration))+
                                    "&remoteControllersBitmap="+QString::number(gamepadMask)+
-                                   "&gcmap="+QString::number(gamepadMask),
+                                   "&gcmap="+QString::number(gamepadMask)+
+                                   "&gcpersist="+QString::number(persistGameControllersOnDisconnect ? 1 : 0),
                                    LAUNCH_TIMEOUT_MS);
 
     qInfo() << "Launch response:" << response;
-
-    // Throws if the request failed
-    verifyResponseStatus(response);
-
-    rtspSessionUrl = getXmlString(response, "sessionUrl0");
-}
-
-void
-NvHTTP::resumeApp(PSTREAM_CONFIGURATION streamConfig, QString& rtspSessionUrl)
-{
-    int riKeyId;
-
-    memcpy(&riKeyId, streamConfig->remoteInputAesIv, sizeof(riKeyId));
-    riKeyId = qFromBigEndian(riKeyId);
-
-    QString response =
-            openConnectionToString(m_BaseUrlHttps,
-                                   "resume",
-                                   "rikey="+QString(QByteArray(streamConfig->remoteInputAesKey, sizeof(streamConfig->remoteInputAesKey)).toHex())+
-                                   "&rikeyid="+QString::number(riKeyId)+
-                                   "&surroundAudioInfo="+QString::number(SURROUNDAUDIOINFO_FROM_AUDIO_CONFIGURATION(streamConfig->audioConfiguration)),
-                                   RESUME_TIMEOUT_MS);
-
-    qInfo() << "Resume response:" << response;
 
     // Throws if the request failed
     verifyResponseStatus(response);
@@ -269,7 +249,7 @@ NvHTTP::quitApp()
     verifyResponseStatus(response);
 
     // Newer GFE versions will just return success even if quitting fails
-    // if we're not the original requestor.
+    // if we're not the original requester.
     if (getCurrentGame(getServerInfo(NvHTTP::NVLL_ERROR)) != 0) {
         // Generate a synthetic GfeResponseException letting the caller know
         // that they can't kill someone else's stream.
@@ -382,7 +362,7 @@ NvHTTP::verifyResponseStatus(QString xml)
         }
     }
 
-    throw GfeHttpResponseException(-1, "Malformed GFE XML (missing root element)");
+    throw GfeHttpResponseException(-1, "Malformed XML (missing root element)");
 }
 
 QImage

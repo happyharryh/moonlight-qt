@@ -7,6 +7,10 @@
 #include "utils.h"
 #include <streaming/streamutils.h>
 
+#ifdef HAVE_LIBVA_DRM
+#include <xf86drm.h>
+#endif
+
 #include <SDL_syswm.h>
 
 #include <unistd.h>
@@ -17,16 +21,17 @@ VAAPIRenderer::VAAPIRenderer(int decoderSelectionPass)
       m_HwContext(nullptr),
       m_BlacklistedForDirectRendering(false),
       m_OverlayMutex(nullptr)
+#ifdef HAVE_EGL
+    , m_EglExportType(EglExportType::Unknown),
+      m_EglImageFactory(this)
+#endif
 {
 #ifdef HAVE_EGL
-    m_PrimeDescriptor.num_layers = 0;
-    m_PrimeDescriptor.num_objects = 0;
-    m_EGLExtDmaBuf = false;
+    SDL_zero(m_PrimeDescriptor);
+#endif
 
-    m_eglCreateImage = nullptr;
-    m_eglCreateImageKHR = nullptr;
-    m_eglDestroyImage = nullptr;
-    m_eglDestroyImageKHR = nullptr;
+#ifdef HAVE_LIBVA_DRM
+    m_DrmFd = -1;
 #endif
 
     SDL_zero(m_OverlayImage);
@@ -58,6 +63,12 @@ VAAPIRenderer::~VAAPIRenderer()
             vaTerminate(display);
         }
     }
+
+#ifdef HAVE_LIBVA_DRM
+    if (m_DrmFd >= 0) {
+        close(m_DrmFd);
+    }
+#endif
 
     if (m_OverlayMutex != nullptr) {
         SDL_DestroyMutex(m_OverlayMutex);
@@ -112,7 +123,41 @@ VAAPIRenderer::openDisplay(SDL_Window* window)
 #if defined(SDL_VIDEO_DRIVER_KMSDRM) && defined(HAVE_LIBVA_DRM) && SDL_VERSION_ATLEAST(2, 0, 15)
     else if (info.subsystem == SDL_SYSWM_KMSDRM) {
         SDL_assert(info.info.kmsdrm.drm_fd >= 0);
-        display = vaGetDisplayDRM(info.info.kmsdrm.drm_fd);
+
+        // It's possible to enter this function several times as we're probing VA drivers.
+        // Make sure to only duplicate the DRM FD the first time through.
+        if (m_DrmFd < 0) {
+            // If the KMSDRM FD is not a render node FD, open the render node for libva to use.
+            // Since libva 2.20, using a primary node will fail in vaGetDriverNames().
+            if (drmGetNodeTypeFromFd(info.info.kmsdrm.drm_fd) != DRM_NODE_RENDER) {
+                char* renderNodePath = drmGetRenderDeviceNameFromFd(info.info.kmsdrm.drm_fd);
+                if (renderNodePath) {
+                    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                                "Opening render node for VAAPI: %s",
+                                renderNodePath);
+                    m_DrmFd = open(renderNodePath, O_RDWR | O_CLOEXEC);
+                    free(renderNodePath);
+                    if (m_DrmFd < 0) {
+                        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                                     "Failed to open render node: %d",
+                                     errno);
+                        return nullptr;
+                    }
+                }
+                else {
+                    SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                                "Failed to get render node path. Using the SDL FD directly.");
+                    m_DrmFd = dup(info.info.kmsdrm.drm_fd);
+                }
+            }
+            else {
+                SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                            "KMSDRM FD is already a render node. Using the SDL FD directly.");
+                m_DrmFd = dup(info.info.kmsdrm.drm_fd);
+            }
+        }
+
+        display = vaGetDisplayDRM(m_DrmFd);
         if (display == nullptr) {
             SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
                          "Unable to open DRM display for VAAPI");
@@ -128,6 +173,32 @@ VAAPIRenderer::openDisplay(SDL_Window* window)
     }
 
     return display;
+}
+
+VAStatus
+VAAPIRenderer::tryVaInitialize(AVVAAPIDeviceContext* vaDeviceContext, PDECODER_PARAMETERS params, int* major, int* minor)
+{
+    VAStatus status;
+
+    SDL_assert(vaDeviceContext->display == nullptr);
+
+    vaDeviceContext->display = openDisplay(params->window);
+    if (vaDeviceContext->display == nullptr) {
+        // openDisplay() logs the error
+        return VA_STATUS_ERROR_INVALID_DISPLAY;
+    }
+
+    status = vaInitialize(vaDeviceContext->display, major, minor);
+    if (status != VA_STATUS_SUCCESS) {
+        // vaInitialize() stores state into the VADisplay even on failure, so we must still
+        // call vaTerminate() even if vaInitialize() failed. Similarly, calling vaInitialize()
+        // more than once on the same VADisplay can cause resource leaks, even if it failed
+        // in the prior call. https://github.com/intel/libva/issues/741
+        vaTerminate(vaDeviceContext->display);
+        vaDeviceContext->display = nullptr;
+    }
+
+    return status;
 }
 
 bool
@@ -151,18 +222,12 @@ VAAPIRenderer::initialize(PDECODER_PARAMETERS params)
     AVHWDeviceContext* deviceContext = (AVHWDeviceContext*)m_HwContext->data;
     AVVAAPIDeviceContext* vaDeviceContext = (AVVAAPIDeviceContext*)deviceContext->hwctx;
 
-    vaDeviceContext->display = openDisplay(params->window);
-    if (vaDeviceContext->display == nullptr) {
-        // openDisplay() logs the error
-        return false;
-    }
-
     int major, minor;
     VAStatus status;
     bool setPathVar = false;
 
     for (;;) {
-        status = vaInitialize(vaDeviceContext->display, &major, &minor);
+        status = tryVaInitialize(vaDeviceContext, params, &major, &minor);
         if (status != VA_STATUS_SUCCESS && qEnvironmentVariableIsEmpty("LIBVA_DRIVER_NAME")) {
             SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                         "Trying fallback VAAPI driver names");
@@ -176,7 +241,7 @@ VAAPIRenderer::initialize(PDECODER_PARAMETERS params)
                 // It should be picked by default on those platforms, but that doesn't
                 // always seem to be the case for some reason.
                 qputenv("LIBVA_DRIVER_NAME", "iHD");
-                status = vaInitialize(vaDeviceContext->display, &major, &minor);
+                status = tryVaInitialize(vaDeviceContext, params, &major, &minor);
             }
 
             if (status != VA_STATUS_SUCCESS) {
@@ -184,21 +249,22 @@ VAAPIRenderer::initialize(PDECODER_PARAMETERS params)
                 // even though the correct driver is still i965. If we hit this path, we'll
                 // explicitly try i965 to handle this case.
                 qputenv("LIBVA_DRIVER_NAME", "i965");
-                status = vaInitialize(vaDeviceContext->display, &major, &minor);
+                status = tryVaInitialize(vaDeviceContext, params, &major, &minor);
             }
 
             if (status != VA_STATUS_SUCCESS) {
                 // The RadeonSI driver is compatible with XWayland but can't be detected by libva
                 // so try it too if all else fails.
                 qputenv("LIBVA_DRIVER_NAME", "radeonsi");
-                status = vaInitialize(vaDeviceContext->display, &major, &minor);
+                status = tryVaInitialize(vaDeviceContext, params, &major, &minor);
             }
 
             if (status != VA_STATUS_SUCCESS && (m_WindowSystem != SDL_SYSWM_X11 || m_DecoderSelectionPass > 0)) {
                 // The unofficial nvidia VAAPI driver over NVDEC/CUDA works well on Wayland,
                 // but we'd rather use CUDA for XWayland and VDPAU for regular X11.
+                // NB: Remember to update the VA-API NVDEC condition below when modifying this!
                 qputenv("LIBVA_DRIVER_NAME", "nvidia");
-                status = vaInitialize(vaDeviceContext->display, &major, &minor);
+                status = tryVaInitialize(vaDeviceContext, params, &major, &minor);
             }
 
             if (status != VA_STATUS_SUCCESS) {
@@ -271,22 +337,24 @@ VAAPIRenderer::initialize(PDECODER_PARAMETERS params)
                     "VAAPI driver is affected by RFI latency bug");
     }
 
-    // Older versions of the Gallium VAAPI driver have a nasty memory leak that
-    // causes memory to be leaked for each submitted frame. I believe this is
-    // resolved in the libva2 drivers (VAAPI 1.x). We will try to use VDPAU
-    // instead for old VAAPI versions or drivers affected by the RFI latency bug.
-    if (m_DecoderSelectionPass == 0 && (major == 0 || m_HasRfiLatencyBug) && qgetenv("FORCE_VAAPI") != "1" && vendorStr.contains("Gallium", Qt::CaseInsensitive)) {
-        // Fail and let VDPAU pick this up
-        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
-                    "Deprioritizing VAAPI on Gallium driver. Set FORCE_VAAPI=1 to override.");
-        return false;
-    }
+    if (m_DecoderSelectionPass == 0 && qgetenv("FORCE_VAAPI") != "1") {
+        // Older versions of the Gallium VAAPI driver have a nasty memory leak that
+        // causes memory to be leaked for each submitted frame. I believe this is
+        // resolved in the libva2 drivers (VAAPI 1.x). We will try to use VDPAU
+        // instead for old VAAPI versions or drivers affected by the RFI latency bug.
+        if ((major == 0 || m_HasRfiLatencyBug) && vendorStr.contains("Gallium", Qt::CaseInsensitive)) {
+            // Fail and let VDPAU pick this up
+            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                        "Deprioritizing VAAPI on Gallium driver. Set FORCE_VAAPI=1 to override.");
+            return false;
+        }
 
-    if (m_DecoderSelectionPass == 0 && qgetenv("FORCE_VAAPI") != "1" && vendorStr.contains("VA-API NVDEC", Qt::CaseInsensitive)) {
         // Prefer CUDA for XWayland and VDPAU for regular X11.
-        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
-                    "Deprioritizing VAAPI for NVIDIA driver on X11/XWayland. Set FORCE_VAAPI=1 to override.");
-        return false;
+        if (m_WindowSystem == SDL_SYSWM_X11 && vendorStr.contains("VA-API NVDEC", Qt::CaseInsensitive)) {
+            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                        "Deprioritizing VAAPI for NVIDIA driver on X11/XWayland. Set FORCE_VAAPI=1 to override.");
+            return false;
+        }
     }
 
     if (WMUtils::isRunningWayland()) {
@@ -482,7 +550,8 @@ int VAAPIRenderer::getDecoderCapabilities()
     int caps = 0;
 
     if (!m_HasRfiLatencyBug) {
-        caps |= CAPABILITY_REFERENCE_FRAME_INVALIDATION_HEVC;
+        caps |= CAPABILITY_REFERENCE_FRAME_INVALIDATION_HEVC |
+                CAPABILITY_REFERENCE_FRAME_INVALIDATION_AV1;
     }
 
     return caps;
@@ -774,12 +843,11 @@ VAAPIRenderer::renderFrame(AVFrame* frame)
 
 // Ensure that vaExportSurfaceHandle() is supported by the VA-API driver
 bool
-VAAPIRenderer::canExportSurfaceHandle(int layerTypeFlag) {
+VAAPIRenderer::canExportSurfaceHandle(int layerTypeFlag, VADRMPRIMESurfaceDescriptor* descriptor) {
     AVHWDeviceContext* deviceContext = (AVHWDeviceContext*)m_HwContext->data;
     AVVAAPIDeviceContext* vaDeviceContext = (AVVAAPIDeviceContext*)deviceContext->hwctx;
     VASurfaceID surfaceId;
     VAStatus st;
-    VADRMPRIMESurfaceDescriptor descriptor;
     VASurfaceAttrib attrs[2];
     int attributeCount = 0;
 
@@ -827,7 +895,7 @@ VAAPIRenderer::canExportSurfaceHandle(int layerTypeFlag) {
                                surfaceId,
                                VA_SURFACE_ATTRIB_MEM_TYPE_DRM_PRIME_2,
                                VA_EXPORT_SURFACE_READ_ONLY | layerTypeFlag,
-                               &descriptor);
+                               descriptor);
 
     vaDestroySurfaces(vaDeviceContext->display, &surfaceId, 1);
 
@@ -837,8 +905,9 @@ VAAPIRenderer::canExportSurfaceHandle(int layerTypeFlag) {
         return false;
     }
 
-    for (size_t i = 0; i < descriptor.num_objects; ++i) {
-        close(descriptor.objects[i].fd);
+    for (size_t i = 0; i < descriptor->num_objects; ++i) {
+        close(descriptor->objects[i].fd);
+        descriptor->objects[i].fd = -1;
     }
 
     SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
@@ -853,36 +922,91 @@ VAAPIRenderer::canExportSurfaceHandle(int layerTypeFlag) {
 
 bool
 VAAPIRenderer::canExportEGL() {
-    // Our EGL export logic requires exporting separate layers
-    return canExportSurfaceHandle(VA_EXPORT_SURFACE_SEPARATE_LAYERS);
+    VADRMPRIMESurfaceDescriptor descriptor;
+
+    return (qgetenv("VAAPI_EGL_SEPARATE_LAYERS") != "1" && canExportSurfaceHandle(VA_EXPORT_SURFACE_COMPOSED_LAYERS, &descriptor)) ||
+           canExportSurfaceHandle(VA_EXPORT_SURFACE_SEPARATE_LAYERS, &descriptor);
 }
 
 AVPixelFormat VAAPIRenderer::getEGLImagePixelFormat() {
-    return (m_VideoFormat & VIDEO_FORMAT_MASK_10BIT) ?
-                AV_PIX_FMT_P010 : AV_PIX_FMT_NV12;
+    switch (m_EglExportType) {
+    case EglExportType::Separate:
+        return (m_VideoFormat & VIDEO_FORMAT_MASK_10BIT) ?
+                   AV_PIX_FMT_P010 : AV_PIX_FMT_NV12;
+
+    case EglExportType::Composed:
+        // This tells EGLRenderer to treat the EGLImage as a single opaque texture
+        return AV_PIX_FMT_DRM_PRIME;
+
+    case EglExportType::Unknown:
+        SDL_assert(m_EglExportType != EglExportType::Unknown);
+        break;
+    }
+
+    return AV_PIX_FMT_NONE;
 }
 
 bool
-VAAPIRenderer::initializeEGL(EGLDisplay,
+VAAPIRenderer::initializeEGL(EGLDisplay dpy,
                              const EGLExtensions &ext) {
-    if (!ext.isSupported("EGL_EXT_image_dma_buf_import")) {
-        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
-                     "VAAPI-EGL: DMABUF unsupported");
+    VADRMPRIMESurfaceDescriptor descriptor;
+
+    if (!m_EglImageFactory.initializeEGL(dpy, ext)) {
         return false;
     }
-    m_EGLExtDmaBuf = ext.isSupported("EGL_EXT_image_dma_buf_import_modifiers");
 
-    // NB: eglCreateImage() and eglCreateImageKHR() have slightly different definitions
-    m_eglCreateImage = (typeof(m_eglCreateImage))eglGetProcAddress("eglCreateImage");
-    m_eglCreateImageKHR = (typeof(m_eglCreateImageKHR))eglGetProcAddress("eglCreateImageKHR");
-    m_eglDestroyImage = (typeof(m_eglDestroyImage))eglGetProcAddress("eglDestroyImage");
-    m_eglDestroyImageKHR = (typeof(m_eglDestroyImageKHR))eglGetProcAddress("eglDestroyImageKHR");
+    // Prefer exporting composed images absent a user override or lack of support for exporting or importing
+    if (qgetenv("VAAPI_EGL_SEPARATE_LAYERS") == "1") {
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                    "Exporting separate layers due to environment variable override");
+        m_EglExportType = EglExportType::Separate;
+    }
+    else if (!canExportSurfaceHandle(VA_EXPORT_SURFACE_COMPOSED_LAYERS, &descriptor)) {
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                    "Exporting separate layers due to lack of support for VA_EXPORT_SURFACE_COMPOSED_LAYERS");
+        m_EglExportType = EglExportType::Separate;
+    }
+    else if (!m_EglImageFactory.supportsImportingFormat(dpy, descriptor.layers[0].drm_format)) {
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                    "Exporting separate layers due to lack of support for importing format: %08x", descriptor.layers[0].drm_format);
+        m_EglExportType = EglExportType::Separate;
+    }
+    else if (!m_EglImageFactory.supportsImportingModifier(dpy, descriptor.layers[0].drm_format, descriptor.objects[0].drm_format_modifier)) {
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                    "Exporting separate layers due to lack of support for importing format and modifier: %08x %016" PRIx64,
+                    descriptor.layers[0].drm_format,
+                    descriptor.objects[0].drm_format_modifier);
+        m_EglExportType = EglExportType::Separate;
+    }
+    else {
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                    "Exporting composed layers with format and modifier: %08x %016" PRIx64,
+                    descriptor.layers[0].drm_format,
+                    descriptor.objects[0].drm_format_modifier);
+        m_EglExportType = EglExportType::Composed;
+    }
 
-    if (!(m_eglCreateImage && m_eglDestroyImage) &&
-            !(m_eglCreateImageKHR && m_eglDestroyImageKHR)) {
-        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
-                     "Missing eglCreateImage()/eglDestroyImage() in EGL driver");
-        return false;
+    // Let's probe for EGL import support on separate layers too, but only warn if it's not supported
+    if (m_EglExportType == EglExportType::Separate) {
+        if (!canExportSurfaceHandle(VA_EXPORT_SURFACE_SEPARATE_LAYERS, &descriptor)) {
+            SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                         "Exporting separate layers is not supported by the VAAPI driver");
+            return false;
+        }
+
+        for (uint32_t i = 0; i < descriptor.num_layers; i++) {
+            if (!m_EglImageFactory.supportsImportingFormat(dpy, descriptor.layers[i].drm_format)) {
+                SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                            "EGL implementation lacks support for importing format: %08x", descriptor.layers[0].drm_format);
+            }
+            else if (!m_EglImageFactory.supportsImportingModifier(dpy, descriptor.layers[i].drm_format,
+                                                                  descriptor.objects[descriptor.layers[i].object_index[0]].drm_format_modifier)) {
+                SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                            "EGL implementation lacks support for importing format and modifier: %08x %016" PRIx64,
+                            descriptor.layers[i].drm_format,
+                            descriptor.objects[descriptor.layers[i].object_index[0]].drm_format_modifier);
+            }
+        }
     }
 
     return true;
@@ -891,15 +1015,29 @@ VAAPIRenderer::initializeEGL(EGLDisplay,
 ssize_t
 VAAPIRenderer::exportEGLImages(AVFrame *frame, EGLDisplay dpy,
                                EGLImage images[EGL_MAX_PLANES]) {
-    ssize_t count = 0;
+    ssize_t count;
+    uint32_t exportFlags = VA_EXPORT_SURFACE_READ_ONLY;
+
+    switch (m_EglExportType) {
+    case EglExportType::Separate:
+        exportFlags |= VA_EXPORT_SURFACE_SEPARATE_LAYERS;
+        break;
+    case EglExportType::Composed:
+        exportFlags |= VA_EXPORT_SURFACE_COMPOSED_LAYERS;
+        break;
+    case EglExportType::Unknown:
+        SDL_assert(m_EglExportType != EglExportType::Unknown);
+        return -1;
+    }
+
     auto hwFrameCtx = (AVHWFramesContext*)frame->hw_frames_ctx->data;
     AVVAAPIDeviceContext* vaDeviceContext = (AVVAAPIDeviceContext*)hwFrameCtx->device_ctx->hwctx;
-
     VASurfaceID surface_id = (VASurfaceID)(uintptr_t)frame->data[3];
+
     VAStatus st = vaExportSurfaceHandle(vaDeviceContext->display,
                                         surface_id,
                                         VA_SURFACE_ATTRIB_MEM_TYPE_DRM_PRIME_2,
-                                        VA_EXPORT_SURFACE_READ_ONLY | VA_EXPORT_SURFACE_SEPARATE_LAYERS,
+                                        exportFlags,
                                         &m_PrimeDescriptor);
     if (st != VA_STATUS_SUCCESS) {
         SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
@@ -907,148 +1045,32 @@ VAAPIRenderer::exportEGLImages(AVFrame *frame, EGLDisplay dpy,
         return -1;
     }
 
-    SDL_assert(m_PrimeDescriptor.num_layers <= EGL_MAX_PLANES);
-
     st = vaSyncSurface(vaDeviceContext->display, surface_id);
     if (st != VA_STATUS_SUCCESS) {
         SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
-                     "vaSyncSurface failed: %d", st);
-        goto sync_fail;
+                     "vaSyncSurface() failed: %d", st);
+        goto fail;
     }
 
-    for (size_t i = 0; i < m_PrimeDescriptor.num_layers; ++i) {
-        const auto &layer = m_PrimeDescriptor.layers[i];
-
-        // Max 30 attributes (1 key + 1 value for each)
-        const int EGL_ATTRIB_COUNT = 30 * 2;
-        EGLAttrib attribs[EGL_ATTRIB_COUNT] = {
-            EGL_LINUX_DRM_FOURCC_EXT, layer.drm_format,
-            EGL_WIDTH, i == 0 ? frame->width : frame->width / 2,
-            EGL_HEIGHT, i == 0 ? frame->height : frame->height / 2,
-        };
-
-        int attribIndex = 6;
-        for (size_t j = 0; j < layer.num_planes; j++) {
-            const auto &object = m_PrimeDescriptor.objects[layer.object_index[j]];
-
-            switch (j) {
-            case 0:
-                attribs[attribIndex++] = EGL_DMA_BUF_PLANE0_FD_EXT;
-                attribs[attribIndex++] = object.fd;
-                attribs[attribIndex++] = EGL_DMA_BUF_PLANE0_OFFSET_EXT;
-                attribs[attribIndex++] = layer.offset[0];
-                attribs[attribIndex++] = EGL_DMA_BUF_PLANE0_PITCH_EXT;
-                attribs[attribIndex++] = layer.pitch[0];
-                if (m_EGLExtDmaBuf) {
-                    attribs[attribIndex++] = EGL_DMA_BUF_PLANE0_MODIFIER_LO_EXT;
-                    attribs[attribIndex++] = (EGLint)(object.drm_format_modifier & 0xFFFFFFFF);
-                    attribs[attribIndex++] = EGL_DMA_BUF_PLANE0_MODIFIER_HI_EXT;
-                    attribs[attribIndex++] = (EGLint)(object.drm_format_modifier >> 32);
-                }
-                break;
-
-            case 1:
-                attribs[attribIndex++] = EGL_DMA_BUF_PLANE1_FD_EXT;
-                attribs[attribIndex++] = object.fd;
-                attribs[attribIndex++] = EGL_DMA_BUF_PLANE1_OFFSET_EXT;
-                attribs[attribIndex++] = layer.offset[1];
-                attribs[attribIndex++] = EGL_DMA_BUF_PLANE1_PITCH_EXT;
-                attribs[attribIndex++] = layer.pitch[1];
-                if (m_EGLExtDmaBuf) {
-                    attribs[attribIndex++] = EGL_DMA_BUF_PLANE1_MODIFIER_LO_EXT;
-                    attribs[attribIndex++] = (EGLint)(object.drm_format_modifier & 0xFFFFFFFF);
-                    attribs[attribIndex++] = EGL_DMA_BUF_PLANE1_MODIFIER_HI_EXT;
-                    attribs[attribIndex++] = (EGLint)(object.drm_format_modifier >> 32);
-                }
-                break;
-
-            case 2:
-                attribs[attribIndex++] = EGL_DMA_BUF_PLANE2_FD_EXT;
-                attribs[attribIndex++] = object.fd;
-                attribs[attribIndex++] = EGL_DMA_BUF_PLANE2_OFFSET_EXT;
-                attribs[attribIndex++] = layer.offset[2];
-                attribs[attribIndex++] = EGL_DMA_BUF_PLANE2_PITCH_EXT;
-                attribs[attribIndex++] = layer.pitch[2];
-                if (m_EGLExtDmaBuf) {
-                    attribs[attribIndex++] = EGL_DMA_BUF_PLANE2_MODIFIER_LO_EXT;
-                    attribs[attribIndex++] = (EGLint)(object.drm_format_modifier & 0xFFFFFFFF);
-                    attribs[attribIndex++] = EGL_DMA_BUF_PLANE2_MODIFIER_HI_EXT;
-                    attribs[attribIndex++] = (EGLint)(object.drm_format_modifier >> 32);
-                }
-                break;
-
-            case 3:
-                attribs[attribIndex++] = EGL_DMA_BUF_PLANE3_FD_EXT;
-                attribs[attribIndex++] = object.fd;
-                attribs[attribIndex++] = EGL_DMA_BUF_PLANE3_OFFSET_EXT;
-                attribs[attribIndex++] = layer.offset[3];
-                attribs[attribIndex++] = EGL_DMA_BUF_PLANE3_PITCH_EXT;
-                attribs[attribIndex++] = layer.pitch[3];
-                if (m_EGLExtDmaBuf) {
-                    attribs[attribIndex++] = EGL_DMA_BUF_PLANE3_MODIFIER_LO_EXT;
-                    attribs[attribIndex++] = (EGLint)(object.drm_format_modifier & 0xFFFFFFFF);
-                    attribs[attribIndex++] = EGL_DMA_BUF_PLANE3_MODIFIER_HI_EXT;
-                    attribs[attribIndex++] = (EGLint)(object.drm_format_modifier >> 32);
-                }
-                break;
-
-            default:
-                Q_UNREACHABLE();
-            }
-        }
-
-        // Terminate the attribute list
-        attribs[attribIndex++] = EGL_NONE;
-        SDL_assert(attribIndex <= EGL_ATTRIB_COUNT);
-
-        if (m_eglCreateImage) {
-            images[i] = m_eglCreateImage(dpy, EGL_NO_CONTEXT,
-                                         EGL_LINUX_DMA_BUF_EXT,
-                                         nullptr, attribs);
-            if (!images[i]) {
-                SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
-                             "eglCreateImage() Failed: %d", eglGetError());
-                goto create_image_fail;
-            }
-        }
-        else {
-            // Cast the EGLAttrib array elements to EGLint for the KHR extension
-            EGLint intAttribs[EGL_ATTRIB_COUNT];
-            for (int i = 0; i < attribIndex; i++) {
-                intAttribs[i] = (EGLint)attribs[i];
-            }
-
-            images[i] = m_eglCreateImageKHR(dpy, EGL_NO_CONTEXT,
-                                            EGL_LINUX_DMA_BUF_EXT,
-                                            nullptr, intAttribs);
-            if (!images[i]) {
-                SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
-                             "eglCreateImageKHR() Failed: %d", eglGetError());
-                goto create_image_fail;
-            }
-        }
-
-        ++count;
+    count = m_EglImageFactory.exportVAImages(frame, &m_PrimeDescriptor, dpy, images);
+    if (count < 0) {
+        goto fail;
     }
+
     return count;
 
-create_image_fail:
-    m_PrimeDescriptor.num_layers = count;
-sync_fail:
-    freeEGLImages(dpy, images);
+fail:
+    for (size_t i = 0; i < m_PrimeDescriptor.num_objects; ++i) {
+        close(m_PrimeDescriptor.objects[i].fd);
+    }
+    m_PrimeDescriptor.num_layers = 0;
+    m_PrimeDescriptor.num_objects = 0;
     return -1;
 }
 
 void
 VAAPIRenderer::freeEGLImages(EGLDisplay dpy, EGLImage images[EGL_MAX_PLANES]) {
-    for (size_t i = 0; i < m_PrimeDescriptor.num_layers; ++i) {
-        if (m_eglDestroyImage) {
-            m_eglDestroyImage(dpy, images[i]);
-        }
-        else {
-            m_eglDestroyImageKHR(dpy, images[i]);
-        }
-    }
+    m_EglImageFactory.freeEGLImages(dpy, images);
     for (size_t i = 0; i < m_PrimeDescriptor.num_objects; ++i) {
         close(m_PrimeDescriptor.objects[i].fd);
     }
@@ -1063,7 +1085,8 @@ VAAPIRenderer::freeEGLImages(EGLDisplay dpy, EGLImage images[EGL_MAX_PLANES]) {
 bool VAAPIRenderer::canExportDrmPrime()
 {
     // Our DRM renderer requires composed layers
-    return canExportSurfaceHandle(VA_EXPORT_SURFACE_COMPOSED_LAYERS);
+    VADRMPRIMESurfaceDescriptor descriptor;
+    return canExportSurfaceHandle(VA_EXPORT_SURFACE_COMPOSED_LAYERS, &descriptor);
 }
 
 bool VAAPIRenderer::mapDrmPrimeFrame(AVFrame* frame, AVDRMFrameDescriptor* drmDescriptor)

@@ -10,8 +10,6 @@
 #include <Limelight.h>
 #include <unistd.h>
 
-#include <SDL_egl.h>
-#include <SDL_opengles2.h>
 #include <SDL_render.h>
 #include <SDL_syswm.h>
 
@@ -465,7 +463,7 @@ bool EGLRenderer::initialize(PDECODER_PARAMETERS params)
         return false;
     }
 
-    // This hint will ensure we use EGL to retreive our GL context,
+    // This hint will ensure we use EGL to retrieve our GL context,
     // even on X11 where that is not the default. EGL is required
     // to avoid a crash in Mesa.
     // https://gitlab.freedesktop.org/mesa/mesa/issues/1011
@@ -669,7 +667,7 @@ bool EGLRenderer::initialize(PDECODER_PARAMETERS params)
     // situation, swap interval > 0 behaves as a frame pacing option
     // rather than a way to eliminate tearing as SDL will block in
     // SwapBuffers until the compositor consumes the frame. This will
-    // needlessly increases latency, so we should avoid it unless asked.
+    // needlessly increases latency, so we should avoid it.
     //
     // HACK: In SDL 2.0.22+ on GNOME systems with fractional DPI scaling,
     // the Wayland viewport can be stale when using Super+Left/Right/Up
@@ -677,7 +675,7 @@ bool EGLRenderer::initialize(PDECODER_PARAMETERS params)
     // with vsync enabled, so this also mitigates that problem too.
     if (params->enableVsync
 #ifdef SDL_VIDEO_DRIVER_WAYLAND
-            && (info.subsystem != SDL_SYSWM_WAYLAND || params->enableFramePacing)
+            && info.subsystem != SDL_SYSWM_WAYLAND
 #endif
             ) {
         SDL_GL_SetSwapInterval(1);
@@ -991,17 +989,6 @@ void EGLRenderer::renderFrame(AVFrame* frame)
 bool EGLRenderer::testRenderFrame(AVFrame* frame)
 {
     EGLImage imgs[EGL_MAX_PLANES];
-
-#ifdef HAVE_MMAL
-    // EGL rendering is so slow on the Raspberry Pi that we should basically
-    // never use it. It is suitable for 1080p 30 FPS on a good day, and much
-    // much less than that if you decide to do something crazy like stream
-    // in full-screen. It's nice that it at least works now on Bullseye, but
-    // it's so slow that we actually wish it didn't.
-    if (qgetenv("RPI_ALLOW_EGL_RENDER") != "1") {
-        return false;
-    }
-#endif
 
     // Make sure we can get working EGLImages from the backend renderer.
     // Some devices (Raspberry Pi) will happily decode into DRM formats that

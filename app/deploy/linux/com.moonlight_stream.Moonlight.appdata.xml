@@ -4,21 +4,19 @@
 	<metadata_license>CC0-1.0</metadata_license>
 	<project_license>GPL-3.0+</project_license>
 	<name>Moonlight</name>
-	<summary>Play games remotely from your NVIDIA GameStream-enabled PC</summary>
+	<summary>Stream games and other applications from another PC running Sunshine or GeForce Experience</summary>
 
 	<description>
-		<p>Moonlight can stream games and other applications from a PC with an NVIDIA GeForce GTX/RTX or NVIDIA Quadro GPU and GeForce/Quadro Experience installed.</p>
+		<p>Moonlight can stream games and other applications from another PC with Sunshine or GeForce Experience software installed.</p>
 		<p>Features include:</p>
 		<ul>
-			<li>Streaming at up to 4K resolution</li>
-			<li>Support for up to 120 FPS streaming (high refresh rate monitor recommended)</li>
 			<li>Hardware accelerated video decoding with VAAPI, VDPAU, and NVDEC support</li>
+			<li>H.264, HEVC, and AV1 codec support</li>
 			<li>7.1 surround sound audio support</li>
+			<li>10-point multitouch support</li>
+			<li>Gamepad support with force feedback for up to 16 players</li>
 			<li>Support for both pointer capture (for games) and direct mouse control (for remote desktop)</li>
 			<li>Support for passing system-wide keyboard shortcuts like Alt+Tab to the host</li>
-			<li>Direct touchscreen mouse control</li>
-			<li>HEVC support for better video compression efficiency</li>
-			<li>Gamepad support with force feedback for up to 4 players</li>
 		</ul>
 	</description>
 
@@ -36,6 +34,65 @@
 	</screenshots>
 
 	<releases>
+		<release version="5.0.1" date="2023-11-02">
+			<description>
+				<p>Bugfixes:</p>
+				<ul>
+					<li>Fixed connection issue streaming from some hosts running GeForce Experience or Sunshine v0.20 and earlier</li>
+					<li>Updated community-contributed translations from Weblate</li>
+				</ul>
+			</description>
+		</release>
+		<release version="5.0.0" date="2023-10-18">
+			<description>
+				<p>New features:</p>
+				<ul>
+					<li>Custom FPS values</li>
+					<li>Streaming using the AV1 codec from Sunshine hosts</li>
+					<li>Horizontal scrolling with Sunshine hosts</li>
+					<li>Native multi-touch input with Sunshine hosts</li>
+					<li>Controller type information is passed to Sunshine for controller type autoselection</li>
+					<li>Extended features of PS4/PS5 controllers (touchpad, battery state, gyro/accelerometer motion, and RGB LED) are natively passed to Sunshine hosts</li>
+					<li>Support for up to 16 gamepads with Sunshine hosts</li>
+					<li>Frame pacing support on Wayland</li>
+					<li>Host-side processing latency is now displayed in the performance overlay with Sunshine hosts</li>
+					<li>Window title now includes the PC name when streaming</li>
+					<li>Alphabetical sorting of the PC list</li>
+					<li>Updated Play and Stop button design to improve contrast with app box art</li>
+					<li>The settings page automatically scrolls to the selected element when using keyboard or gamepad navigation</li>
+					<li>Pressing Share+PS buttons on PS4/PS5 controllers can be used to emulate a clickpad press</li>
+					<li>Improved audio quality when streaming with a high bitrate from remote hosts</li>
+					<li>Increased mouse polling rate</li>
+				</ul>
+				<p>Behavior Changes:</p>
+				<ul>
+					<li>IPv6 addresses must be provided in URL-escaped form. Example: [2001:db8::1234:5678] or [2001:db8::1234:5678]:47989</li>
+					<li>Default bitrate logic has been adjusted to behave better with custom resolutions and frame rates</li>
+				</ul>
+				<p>Bugfixes:</p>
+				<ul>
+					<li>Reduced the frequency of audio underruns (clicks and pops) by increasing audio buffer size</li>
+					<li>Fixed "Quitting App" message never dismissing in some cases</li>
+					<li>Fixed parsing IPv6 literals with port numbers</li>
+					<li>Fixed unnecessary WiFi activity causing stream disruptions</li>
+					<li>Fixed paired hosts being forgotten if Moonlight terminates while writing hosts to disk</li>
+					<li>Fixed freeze when closing the stream on Windows with some software that uses DX11 hooks</li>
+					<li>Fixed delayed PC wake when activating Wake-On-LAN feature</li>
+					<li>Fixed Wake-on-LAN when Sunshine is running on alternate ports</li>
+					<li>Fixed leak of /dev/dri fds when trying to initialize VAAPI decoder</li>
+					<li>Fixed support for the Applications/Menu key</li>
+					<li>Fixed automatic language detection for Simplified Chinese and Traditional Chinese</li>
+					<li>Fixed streaming from Sunshine when the client PC has multiple network interfaces or IPv6 privacy extensions enabled</li>
+					<li>Fixed small receive buffer causing video packet loss on some systems</li>
+					<li>Fixed theme overrides causing the UI to be unusable on some systems</li>
+					<li>Fixed tearing with V-Sync enabled on macOS and Linux when using the SDL renderer (software decoding and some hardware decoders)</li>
+					<li>Fixed stateful V4L2 hardware decoding using h264_v4l2m2m and hevc_v4l2m2m decoders</li>
+					<li>Fixed CVE-2023-42801</li>
+					<li>Updated included gamepad mappings</li>
+					<li>Updated community-contributed translations from Weblate</li>
+				</ul>
+			</description>
+		</release>
 		<release version="4.3.1" date="2022-11-03">
 			<description>
 				<p>Changes:</p>

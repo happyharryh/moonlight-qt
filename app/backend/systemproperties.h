@@ -23,13 +23,14 @@ public:
     Q_PROPERTY(bool hasBrowser MEMBER hasBrowser CONSTANT)
     Q_PROPERTY(bool hasDiscordIntegration MEMBER hasDiscordIntegration CONSTANT)
     Q_PROPERTY(QString unmappedGamepads MEMBER unmappedGamepads NOTIFY unmappedGamepadsChanged)
-    Q_PROPERTY(int maximumStreamingFrameRate MEMBER maximumStreamingFrameRate CONSTANT)
     Q_PROPERTY(QSize maximumResolution MEMBER maximumResolution CONSTANT)
     Q_PROPERTY(QString versionString MEMBER versionString CONSTANT)
     Q_PROPERTY(bool supportsHdr MEMBER supportsHdr CONSTANT)
+    Q_PROPERTY(bool usesMaterial3Theme MEMBER usesMaterial3Theme CONSTANT)
 
     Q_INVOKABLE void refreshDisplays();
     Q_INVOKABLE QRect getNativeResolution(int displayIndex);
+    Q_INVOKABLE int getRefreshRate(int displayIndex);
 
 signals:
     void unmappedGamepadsChanged();
@@ -49,10 +50,11 @@ private:
     bool hasBrowser;
     bool hasDiscordIntegration;
     QString unmappedGamepads;
-    int maximumStreamingFrameRate;
     QSize maximumResolution;
     QList<QRect> monitorNativeResolutions;
+    QList<int> monitorRefreshRates;
     QString versionString;
     bool supportsHdr;
+    bool usesMaterial3Theme;
 };
 

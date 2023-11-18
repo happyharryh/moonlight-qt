@@ -1,6 +1,11 @@
 #pragma once
 
 #include "renderer.h"
+#include "swframemapper.h"
+
+#ifdef HAVE_EGL
+#include "eglimagefactory.h"
+#endif
 
 #include <xf86drm.h>
 #include <xf86drmMode.h>
@@ -43,7 +48,7 @@ namespace DrmDefs
 
 class DrmRenderer : public IFFmpegRenderer {
 public:
-    DrmRenderer(IFFmpegRenderer *backendRenderer = nullptr);
+    DrmRenderer(bool hwaccel = false, IFFmpegRenderer *backendRenderer = nullptr);
     virtual ~DrmRenderer() override;
     virtual bool initialize(PDECODER_PARAMETERS params) override;
     virtual bool prepareDecoderContext(AVCodecContext* context, AVDictionary** options) override;
@@ -54,6 +59,7 @@ public:
     virtual bool needsTestFrame() override;
     virtual bool testRenderFrame(AVFrame* frame) override;
     virtual bool isDirectRenderingSupported() override;
+    virtual int getDecoderColorspace() override;
     virtual void setHdrMode(bool enabled) override;
 #ifdef HAVE_EGL
     virtual bool canExportEGL() override;
@@ -66,8 +72,12 @@ public:
 private:
     const char* getDrmColorEncodingValue(AVFrame* frame);
     const char* getDrmColorRangeValue(AVFrame* frame);
+    bool mapSoftwareFrame(AVFrame* frame, AVDRMFrameDescriptor* mappedFrame);
+    bool addFbForFrame(AVFrame* frame, uint32_t* newFbId, bool testMode);
 
     IFFmpegRenderer* m_BackendRenderer;
+    bool m_DrmPrimeBackend;
+    bool m_HwAccelBackend;
     AVBufferRef* m_HwContext;
     int m_DrmFd;
     bool m_SdlOwnsDrmFd;
@@ -80,18 +90,28 @@ private:
     uint32_t m_CurrentFbId;
     bool m_LastFullRange;
     int m_LastColorSpace;
+    drmModePlanePtr m_Plane;
     drmModePropertyPtr m_ColorEncodingProp;
     drmModePropertyPtr m_ColorRangeProp;
     drmModePropertyPtr m_HdrOutputMetadataProp;
+    drmModePropertyPtr m_ColorspaceProp;
+    drmVersionPtr m_Version;
     uint32_t m_HdrOutputMetadataBlobId;
     SDL_Rect m_OutputRect;
 
+    static constexpr int k_SwFrameCount = 2;
+    SwFrameMapper m_SwFrameMapper;
+    int m_CurrentSwFrameIdx;
+    struct {
+        uint32_t handle;
+        uint32_t pitch;
+        uint64_t size;
+        uint8_t* mapping;
+        int primeFd;
+    } m_SwFrame[k_SwFrameCount];
+
 #ifdef HAVE_EGL
-    bool m_EGLExtDmaBuf;
-    PFNEGLCREATEIMAGEPROC m_eglCreateImage;
-    PFNEGLDESTROYIMAGEPROC m_eglDestroyImage;
-    PFNEGLCREATEIMAGEKHRPROC m_eglCreateImageKHR;
-    PFNEGLDESTROYIMAGEKHRPROC m_eglDestroyImageKHR;
+    EglImageFactory m_EglImageFactory;
 #endif
 };
 

@@ -4,9 +4,10 @@
         <file>res/desktop_windows-48px.svg</file>
         <file>res/ic_add_to_queue_white_48px.svg</file>
         <file>res/baseline-lock-24px.svg</file>
-        <file>res/baseline-play_circle_filled_white-48px.svg</file>
+        <file>res/play_arrow_FILL1_wght700_GRAD200_opsz48.svg</file>
         <file>res/baseline-warning-24px.svg</file>
-        <file>res/baseline-cancel-24px.svg</file>
+        <file>res/warning_FILL1_wght300_GRAD200_opsz24.svg</file>
+        <file>res/stop_FILL1_wght700_GRAD200_opsz48.svg</file>
         <file>res/no_app_image.png</file>
         <file>res/settings.svg</file>
         <file>res/arrow_left.svg</file>
@@ -47,8 +48,8 @@
         <file>languages/qml_tr.qm</file>
         <file>languages/qml_uk.ts</file>
         <file>languages/qml_uk.qm</file>
-        <file>languages/qml_zh_Hant.ts</file>
-        <file>languages/qml_zh_Hant.qm</file>
+        <file>languages/qml_zh_TW.ts</file>
+        <file>languages/qml_zh_TW.qm</file>
         <file>languages/qml_el.ts</file>
         <file>languages/qml_el.qm</file>
         <file>languages/qml_hi.ts</file>
@@ -61,6 +62,8 @@
         <file>languages/qml_pl.qm</file>
         <file>languages/qml_cs.ts</file>
         <file>languages/qml_cs.qm</file>
+        <file>languages/qml_he.ts</file>
+        <file>languages/qml_he.qm</file>
         <!-- Don't include pt_BR until it is more complete -->
         <!--file>languages/qml_pt_BR.qm</file-->
         <!--file>languages/qml_pt_BR.ts</file-->

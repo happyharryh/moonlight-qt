@@ -28,8 +28,17 @@ bool SdlAudioRenderer::prepareForPlayback(const OPUS_MULTISTREAM_CONFIGURATION* 
 
     // On PulseAudio systems, setting a value too small can cause underruns for other
     // applications sharing this output device. We impose a floor of 480 samples (10 ms)
-    // to mitigate this issue.
+    // to mitigate this issue. Otherwise, we will buffer up to 3 frames of audio which
+    // is 15 ms at regular 5 ms frames and 30 ms at 10 ms frames for slow connections.
+    // The buffering helps avoid audio underruns due to network jitter.
+#ifndef Q_OS_DARWIN
+    want.samples = SDL_max(480, opusConfig->samplesPerFrame * 3);
+#else
+    // HACK: Changing the buffer size can lead to Bluetooth HFP
+    // audio issues on macOS, so we're leaving this alone.
+    // https://github.com/moonlight-stream/moonlight-qt/issues/1071
     want.samples = SDL_max(480, opusConfig->samplesPerFrame);
+#endif
 
     m_FrameSize = opusConfig->samplesPerFrame * sizeof(short) * opusConfig->channelCount;
 
@@ -57,6 +66,10 @@ bool SdlAudioRenderer::prepareForPlayback(const OPUS_MULTISTREAM_CONFIGURATION* 
                 "Obtained audio buffer: %u samples (%u bytes)",
                 have.samples,
                 have.size);
+
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                "SDL audio driver: %s",
+                SDL_GetCurrentAudioDriver());
 
     // Start playback
     SDL_PauseAudioDevice(m_AudioDevice, 0);

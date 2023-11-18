@@ -32,7 +32,8 @@ public:
         VCC_AUTO,
         VCC_FORCE_H264,
         VCC_FORCE_HEVC,
-        VCC_FORCE_HEVC_HDR
+        VCC_FORCE_HEVC_HDR_DEPRECATED, // Kept for backwards compatibility
+        VCC_FORCE_AV1
     };
     Q_ENUM(VideoCodecConfig)
 
@@ -82,7 +83,7 @@ public:
         LANG_SV,
         LANG_TR,
         LANG_UK,
-        LANG_ZH_HANT,
+        LANG_ZH_TW,
         LANG_PT,
         LANG_PT_BR,
         LANG_EL,
@@ -90,6 +91,7 @@ public:
         LANG_HI,
         LANG_PL,
         LANG_CS,
+        LANG_HE,
     };
     Q_ENUM(Language);
 
@@ -109,7 +111,6 @@ public:
     Q_PROPERTY(bool gameOptimizations MEMBER gameOptimizations NOTIFY gameOptimizationsChanged)
     Q_PROPERTY(bool playAudioOnHost MEMBER playAudioOnHost NOTIFY playAudioOnHostChanged)
     Q_PROPERTY(bool multiController MEMBER multiController NOTIFY multiControllerChanged)
-    Q_PROPERTY(bool unsupportedFps MEMBER unsupportedFps NOTIFY unsupportedFpsChanged)
     Q_PROPERTY(bool enableMdns MEMBER enableMdns NOTIFY enableMdnsChanged)
     Q_PROPERTY(bool quitAppAfter MEMBER quitAppAfter NOTIFY quitAppAfterChanged)
     Q_PROPERTY(bool absoluteMouseMode MEMBER absoluteMouseMode NOTIFY absoluteMouseModeChanged)
@@ -118,9 +119,10 @@ public:
     Q_PROPERTY(bool connectionWarnings MEMBER connectionWarnings NOTIFY connectionWarningsChanged)
     Q_PROPERTY(bool richPresence MEMBER richPresence NOTIFY richPresenceChanged)
     Q_PROPERTY(bool gamepadMouse MEMBER gamepadMouse NOTIFY gamepadMouseChanged)
-    Q_PROPERTY(bool detectNetworkBlocking MEMBER detectNetworkBlocking NOTIFY detectNetworkBlockingChanged);
+    Q_PROPERTY(bool detectNetworkBlocking MEMBER detectNetworkBlocking NOTIFY detectNetworkBlockingChanged)
     Q_PROPERTY(AudioConfig audioConfig MEMBER audioConfig NOTIFY audioConfigChanged)
     Q_PROPERTY(VideoCodecConfig videoCodecConfig MEMBER videoCodecConfig NOTIFY videoCodecConfigChanged)
+    Q_PROPERTY(bool enableHdr MEMBER enableHdr NOTIFY enableHdrChanged)
     Q_PROPERTY(VideoDecoderSelection videoDecoderSelection MEMBER videoDecoderSelection NOTIFY videoDecoderSelectionChanged)
     Q_PROPERTY(WindowMode windowMode MEMBER windowMode NOTIFY windowModeChanged)
     Q_PROPERTY(WindowMode recommendedFullScreenMode MEMBER recommendedFullScreenMode CONSTANT)
@@ -149,7 +151,6 @@ public:
     bool gameOptimizations;
     bool playAudioOnHost;
     bool multiController;
-    bool unsupportedFps;
     bool enableMdns;
     bool quitAppAfter;
     bool absoluteMouseMode;
@@ -168,6 +169,7 @@ public:
     int packetSize;
     AudioConfig audioConfig;
     VideoCodecConfig videoCodecConfig;
+    bool enableHdr;
     VideoDecoderSelection videoDecoderSelection;
     WindowMode windowMode;
     WindowMode recommendedFullScreenMode;
@@ -193,6 +195,7 @@ signals:
     void absoluteTouchModeChanged();
     void audioConfigChanged();
     void videoCodecConfigChanged();
+    void enableHdrChanged();
     void videoDecoderSelectionChanged();
     void uiDisplayModeChanged();
     void windowModeChanged();

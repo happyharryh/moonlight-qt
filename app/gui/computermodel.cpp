@@ -189,19 +189,18 @@ void ComputerModel::handlePairingCompleted(NvComputer*, QString error)
 
 void ComputerModel::handleComputerStateChanged(NvComputer* computer)
 {
-    // If this is an existing computer, we can report the data changed
-    int index = m_Computers.indexOf(computer);
-    if (index >= 0) {
-        // Let the view know that this specific computer changed
-        emit dataChanged(createIndex(index, 0), createIndex(index, 0));
+    QVector<NvComputer*> newComputerList = m_ComputerManager->getComputers();
+
+    // Reset the model if the structural layout of the list has changed
+    if (m_Computers != newComputerList) {
+        beginResetModel();
+        m_Computers = newComputerList;
+        endResetModel();
     }
     else {
-        // This is a new PC which may be inserted at an arbitrary point
-        // in our computer list (since it comes from CM's QMap). Reload
-        // the whole model state to ensure it stays consistent.
-        beginResetModel();
-        m_Computers = m_ComputerManager->getComputers();
-        endResetModel();
+        // Let the view know that this specific computer changed
+        int index = m_Computers.indexOf(computer);
+        emit dataChanged(createIndex(index, 0), createIndex(index, 0));
     }
 }
 

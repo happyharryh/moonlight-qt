@@ -48,6 +48,9 @@ win32 {
 
     INCLUDEPATH += $$PWD/../libs/windows/include
     LIBS += ws2_32.lib winmm.lib dxva2.lib ole32.lib gdi32.lib user32.lib d3d9.lib dwmapi.lib dbghelp.lib
+
+    # Work around a conflict with math.h inclusion between SDL and Qt 6
+    DEFINES += _USE_MATH_DEFINES
 }
 macx {
     INCLUDEPATH += $$PWD/../libs/mac/include
@@ -65,51 +68,73 @@ unix:!macx {
     CONFIG += link_pkgconfig
     PKGCONFIG += openssl sdl2 SDL2_ttf opus
 
-    packagesExist(libavcodec) {
-        PKGCONFIG += libavcodec libavutil
-        CONFIG += ffmpeg
+    !disable-ffmpeg {
+        packagesExist(libavcodec) {
+            PKGCONFIG += libavcodec libavutil
+            CONFIG += ffmpeg
 
-        packagesExist(libva) {
-            packagesExist(libva-x11) {
-                CONFIG += libva-x11
+            !disable-libva {
+                packagesExist(libva) {
+                    !disable-x11 {
+                        packagesExist(libva-x11) {
+                            CONFIG += libva-x11
+                        }
+                    }
+                    !disable-wayland {
+                        packagesExist(libva-wayland) {
+                            CONFIG += libva-wayland
+                        }
+                    }
+                    !disable-libdrm {
+                        packagesExist(libva-drm) {
+                            CONFIG += libva-drm
+                        }
+                    }
+                    CONFIG += libva
+                }
             }
-            packagesExist(libva-wayland) {
-                CONFIG += libva-wayland
+
+            !disable-libvdpau {
+                packagesExist(vdpau) {
+                    CONFIG += libvdpau
+                }
             }
-            packagesExist(libva-drm) {
-                CONFIG += libva-drm
+
+            !disable-mmal {
+                packagesExist(mmal) {
+                    PKGCONFIG += mmal
+                    CONFIG += mmal
+                }
             }
-            CONFIG += libva
+
+            !disable-libdrm {
+                packagesExist(libdrm) {
+                    PKGCONFIG += libdrm
+                    CONFIG += libdrm
+                }
+            }
+
+            !disable-cuda {
+                packagesExist(ffnvcodec) {
+                    PKGCONFIG += ffnvcodec
+                    CONFIG += cuda
+                }
+            }
         }
 
-        packagesExist(vdpau) {
-            CONFIG += libvdpau
+        !disable-wayland {
+            packagesExist(wayland-client) {
+                CONFIG += wayland
+                PKGCONFIG += wayland-client
+            }
         }
 
-        packagesExist(mmal) {
-            PKGCONFIG += mmal
-            CONFIG += mmal
+        !disable-x11 {
+            packagesExist(x11) {
+                DEFINES += HAS_X11
+                PKGCONFIG += x11
+            }
         }
-
-        packagesExist(libdrm) {
-            PKGCONFIG += libdrm
-            CONFIG += libdrm
-        }
-
-        packagesExist(ffnvcodec) {
-            PKGCONFIG += ffnvcodec
-            CONFIG += cuda
-        }
-    }
-
-    packagesExist(wayland-client) {
-        DEFINES += HAS_WAYLAND
-        PKGCONFIG += wayland-client
-    }
-
-    packagesExist(x11) {
-        DEFINES += HAS_X11
-        PKGCONFIG += x11
     }
 }
 win32 {
@@ -120,7 +145,7 @@ win32:!winrt {
     CONFIG += soundio discord-rpc
 }
 macx {
-    LIBS += -lssl -lcrypto -lavcodec.59 -lavutil.57 -lopus -framework SDL2 -framework SDL2_ttf
+    LIBS += -lssl -lcrypto -lavcodec.60 -lavutil.58 -lopus -framework SDL2 -framework SDL2_ttf
     LIBS += -lobjc -framework VideoToolbox -framework AVFoundation -framework CoreVideo -framework CoreGraphics -framework CoreMedia -framework AppKit -framework Metal
 
     # For libsoundio
@@ -216,15 +241,15 @@ ffmpeg {
     SOURCES += \
         streaming/video/ffmpeg.cpp \
         streaming/video/ffmpeg-renderers/sdlvid.cpp \
-        streaming/video/ffmpeg-renderers/pacer/pacer.cpp \
-        streaming/video/ffmpeg-renderers/pacer/nullthreadedvsyncsource.cpp
+        streaming/video/ffmpeg-renderers/swframemapper.cpp \
+        streaming/video/ffmpeg-renderers/pacer/pacer.cpp
 
     HEADERS += \
         streaming/video/ffmpeg.h \
         streaming/video/ffmpeg-renderers/renderer.h \
         streaming/video/ffmpeg-renderers/sdlvid.h \
-        streaming/video/ffmpeg-renderers/pacer/pacer.h \
-        streaming/video/ffmpeg-renderers/pacer/nullthreadedvsyncsource.h
+        streaming/video/ffmpeg-renderers/swframemapper.h \
+        streaming/video/ffmpeg-renderers/pacer/pacer.h
 }
 libva {
     message(VAAPI renderer selected)
@@ -246,7 +271,7 @@ libva-wayland {
     PKGCONFIG += libva-wayland
     DEFINES += HAVE_LIBVA_WAYLAND
 }
-libva-wayland {
+libva-drm {
     message(VAAPI DRM support enabled)
 
     PKGCONFIG += libva-drm
@@ -265,6 +290,18 @@ mmal {
     DEFINES += HAVE_MMAL
     SOURCES += streaming/video/ffmpeg-renderers/mmal.cpp
     HEADERS += streaming/video/ffmpeg-renderers/mmal.h
+
+    # We suppress EGL usage when MMAL is available because MMAL has
+    # significantly better performance than EGL on the Pi. Setting
+    # this option allows EGL usage even if built with MMAL support.
+    #
+    # It is highly recommended to also build with 'glslow' to avoid
+    # EGL being preferred if direct DRM rendering is available.
+    allow-egl-with-mmal {
+        message(Allowing EGL usage with MMAL enabled)
+
+        DEFINES += ALLOW_EGL_WITH_MMAL
+    }
 }
 libdrm {
     message(DRM renderer selected)
@@ -285,6 +322,9 @@ cuda {
     DEFINES += HAVE_CUDA
     SOURCES += streaming/video/ffmpeg-renderers/cuda.cpp
     HEADERS += streaming/video/ffmpeg-renderers/cuda.h
+
+    # ffnvcodec uses libdl in cuda_load_functions()/cuda_free_functions()
+    LIBS += -ldl
 }
 config_EGL {
     message(EGL renderer selected)
@@ -293,8 +333,11 @@ config_EGL {
     DEFINES += HAVE_EGL
     SOURCES += \
         streaming/video/ffmpeg-renderers/eglvid.cpp \
-        streaming/video/ffmpeg-renderers/egl_extensions.cpp
-    HEADERS += streaming/video/ffmpeg-renderers/eglvid.h
+        streaming/video/ffmpeg-renderers/egl_extensions.cpp \
+        streaming/video/ffmpeg-renderers/eglimagefactory.cpp
+    HEADERS += \
+        streaming/video/ffmpeg-renderers/eglvid.h \
+        streaming/video/ffmpeg-renderers/eglimagefactory.h
 }
 config_SL {
     message(Steam Link build configuration selected)
@@ -352,6 +395,18 @@ embedded {
 
     DEFINES += EMBEDDED_BUILD
 }
+glslow {
+    message(GL slow build)
+
+    DEFINES += GL_IS_SLOW
+}
+wayland {
+    message(Wayland extensions enabled)
+
+    DEFINES += HAS_WAYLAND
+    SOURCES += streaming/video/ffmpeg-renderers/pacer/waylandvsyncsource.cpp
+    HEADERS += streaming/video/ffmpeg-renderers/pacer/waylandvsyncsource.h
+}
 
 RESOURCES += \
     resources.qrc \
@@ -373,14 +428,15 @@ TRANSLATIONS += \
     languages/qml_sv.ts \
     languages/qml_tr.ts \
     languages/qml_uk.ts \
-    languages/qml_zh_Hant.ts \
+    languages/qml_zh_TW.ts \
     languages/qml_el.ts \
     languages/qml_hi.ts \
     languages/qml_it.ts \
     languages/qml_pt.ts \
     languages/qml_pt_BR.ts \
     languages/qml_pl.ts \
-    languages/qml_cs.ts
+    languages/qml_cs.ts \
+    languages/qml_he.ts
 
 # Additional import path used to resolve QML modules in Qt Creator's code model
 QML_IMPORT_PATH =

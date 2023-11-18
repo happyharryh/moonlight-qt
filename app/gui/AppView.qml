@@ -1,5 +1,6 @@
 import QtQuick 2.9
 import QtQuick.Controls 2.2
+import QtQuick.Controls.Material 2.2
 
 import AppModel 1.0
 import ComputerManager 1.0
@@ -89,7 +90,7 @@ CenteredGridView {
 
             onSourceSizeChanged: {
                 // Nearly all of Nvidia's official box art does not match the dimensions of placeholder
-                // images, however the one known exeception is Overcooked. Therefore, we only execute
+                // images, however the one known exception is Overcooked. Therefore, we only execute
                 // the image size checks if this is not an app collector game. We know the officially
                 // supported games all have box art, so this check is not required.
                 if (!model.isAppCollectorGame &&
@@ -121,15 +122,15 @@ CenteredGridView {
             anchors.fill: appIcon
 
             sourceComponent: Item {
-                ToolButton {
+                RoundButton {
                     anchors.horizontalCenterOffset: appIcon.isPlaceholder ? -47 : 0
                     anchors.verticalCenterOffset: appIcon.isPlaceholder ? -75 : -60
                     anchors.centerIn: parent
-                    implicitWidth: 125
-                    implicitHeight: 125
+                    implicitWidth: 85
+                    implicitHeight: 85
 
                     Image {
-                        source: "qrc:/res/baseline-play_circle_filled_white-48px.svg"
+                        source: "qrc:/res/play_arrow_FILL1_wght700_GRAD200_opsz48.svg"
                         anchors.centerIn: parent
                         sourceSize {
                             width: 75
@@ -145,17 +146,19 @@ CenteredGridView {
                     ToolTip.delay: 1000
                     ToolTip.timeout: 3000
                     ToolTip.visible: hovered
+
+                    Material.background: "#D0808080"
                 }
 
-                ToolButton {
+                RoundButton {
                     anchors.horizontalCenterOffset: appIcon.isPlaceholder ? 47 : 0
                     anchors.verticalCenterOffset: appIcon.isPlaceholder ? -75 : 60
                     anchors.centerIn: parent
-                    implicitWidth: 125
-                    implicitHeight: 125
+                    implicitWidth: 85
+                    implicitHeight: 85
 
                     Image {
-                        source: "qrc:/res/baseline-cancel-24px.svg"
+                        source: "qrc:/res/stop_FILL1_wght700_GRAD200_opsz48.svg"
                         anchors.centerIn: parent
                         sourceSize {
                             width: 75
@@ -171,6 +174,8 @@ CenteredGridView {
                     ToolTip.delay: 1000
                     ToolTip.timeout: 3000
                     ToolTip.visible: hovered
+
+                    Material.background: "#D0808080"
                 }
             }
         }
@@ -345,7 +350,7 @@ CenteredGridView {
 
         function quitApp() {
             var component = Qt.createComponent("QuitSegue.qml")
-            var params = {"appName": appName}
+            var params = {"appName": appName, "quitRunningAppFn": appModel.quitRunningApp}
             if (segueToStream) {
                 // Store the session and app name if we're going to stream after
                 // successfully quitting the old app.
@@ -358,9 +363,6 @@ CenteredGridView {
             }
 
             stackView.push(component.createObject(stackView, params))
-
-            // Trigger the quit after pushing the quit segue on screen
-            appModel.quitRunningApp()
         }
 
         onAccepted: quitApp()

@@ -4,7 +4,6 @@ setlocal enableDelayedExpansion
 rem Run from Qt command prompt with working directory set to root of repo
 
 set BUILD_CONFIG=%1
-set ARCH=%2
 
 rem Convert to lower case for windeployqt
 if /I "%BUILD_CONFIG%"=="debug" (
@@ -28,21 +27,66 @@ if /I "%BUILD_CONFIG%"=="debug" (
             )
         ) else (
             echo Invalid build configuration - expected 'debug' or 'release'
-            echo Usage: scripts\build-arch.bat ^(release^|debug^) ^(x86^|x64^|ARM64^)
+            echo Usage: scripts\build-arch.bat ^(release^|debug^)
             exit /b 1
         )
     )
 )
 
-if /I "%ARCH%" NEQ "x86" (
-    if /I "%ARCH%" NEQ "x64" (
-        if /I "%ARCH%" NEQ "ARM64" (
-            echo Invalid build architecture - expected 'x86', 'x64', or 'ARM64'
-            echo Usage: scripts\build-arch.bat ^(release^|debug^) ^(x86^|x64^|ARM64^)
-            exit /b 1
+rem Locate qmake and determine if we're using qmake.exe or qmake.bat
+rem qmake.bat is an ARM64 forwarder to the x64 version of qmake.exe
+where qmake.bat
+if !ERRORLEVEL! EQU 0 (
+    set QMAKE_CMD=call qmake.bat
+) else (
+    where qmake.exe
+    if !ERRORLEVEL! EQU 0 (
+        set QMAKE_CMD=qmake.exe
+    ) else (
+        echo Unable to find QMake. Did you add Qt bins to your PATH?
+        goto Error
+    )
+)
+
+rem Find Qt path to determine our architecture
+for /F %%i in ('where qmake') do set QT_PATH=%%i
+
+rem Strip the qmake filename off the end to get the Qt bin directory itself
+set QT_PATH=%QT_PATH:\qmake.exe=%
+set QT_PATH=%QT_PATH:\qmake.bat=%
+set QT_PATH=%QT_PATH:\qmake.cmd=%
+
+echo QT_PATH=%QT_PATH%
+if not x%QT_PATH:_arm64=%==x%QT_PATH% (
+    set ARCH=arm64
+
+    rem Replace the _arm64 suffix with _64 to get the x64 bin path
+    set HOSTBIN_PATH=%QT_PATH:_arm64=_64%
+    echo HOSTBIN_PATH=!HOSTBIN_PATH!
+
+    if exist %QT_PATH%\windeployqt.exe (
+        echo Using windeployqt.exe from QT_PATH
+        set WINDEPLOYQT_CMD=windeployqt.exe
+    ) else (
+        echo Using windeployqt.exe from HOSTBIN_PATH
+        set WINDEPLOYQT_CMD=!HOSTBIN_PATH!\windeployqt.exe --qtpaths %QT_PATH%\qtpaths.bat
+    )
+) else (
+    if not x%QT_PATH:_64=%==x%QT_PATH% (
+        set ARCH=x64
+        set WINDEPLOYQT_CMD=windeployqt.exe
+    ) else (
+        if not x%QT_PATH:msvc=%==x%QT_PATH% (
+            set ARCH=x86
+            set WINDEPLOYQT_CMD=windeployqt.exe
+        ) else (
+            echo Unable to determine Qt architecture
+            goto Error
         )
     )
 )
+
+echo Detected target architecture: %ARCH%
 
 set SIGNTOOL_PARAMS=sign /tr http://timestamp.digicert.com /td sha256 /fd sha256 /sha1 b28642b756ebec4884d1063dfa4de803a6dcecdc /v
 
@@ -90,7 +134,7 @@ mkdir %SYMBOLS_FOLDER%
 
 echo Configuring the project
 pushd %BUILD_FOLDER%
-qmake %SOURCE_ROOT%\moonlight-qt.pro
+%QMAKE_CMD% %SOURCE_ROOT%\moonlight-qt.pro
 if !ERRORLEVEL! NEQ 0 goto Error
 popd
 
@@ -144,12 +188,20 @@ echo Copying GC mapping list
 copy %SOURCE_ROOT%\app\SDL_GameControllerDB\gamecontrollerdb.txt %DEPLOY_FOLDER%
 if !ERRORLEVEL! NEQ 0 goto Error
 
-echo Copying qt.conf
-copy %SOURCE_ROOT%\app\qt.conf %DEPLOY_FOLDER%
-if !ERRORLEVEL! NEQ 0 goto Error
+if not x%QT_PATH:\5.=%==x%QT_PATH% (
+    echo Copying qt.conf for Qt 5
+    copy %SOURCE_ROOT%\app\qt_qt5.conf %DEPLOY_FOLDER%\qt.conf
+    if !ERRORLEVEL! NEQ 0 goto Error
+
+    rem Qt 5.15
+    set WINDEPLOYQT_ARGS=--no-qmltooling --no-virtualkeyboard
+) else (
+    rem Qt 6.5
+    set WINDEPLOYQT_ARGS=--no-system-d3d-compiler --skip-plugin-types qmltooling,generic
+)
 
 echo Deploying Qt dependencies
-windeployqt.exe --dir %DEPLOY_FOLDER% --%BUILD_CONFIG% --qmldir %SOURCE_ROOT%\app\gui --no-opengl-sw --no-compiler-runtime --no-qmltooling --no-virtualkeyboard --no-sql %BUILD_FOLDER%\app\%BUILD_CONFIG%\Moonlight.exe
+%WINDEPLOYQT_CMD% --dir %DEPLOY_FOLDER% --%BUILD_CONFIG% --qmldir %SOURCE_ROOT%\app\gui --no-opengl-sw --no-compiler-runtime --no-sql %WINDEPLOYQT_ARGS% %BUILD_FOLDER%\app\%BUILD_CONFIG%\Moonlight.exe
 if !ERRORLEVEL! NEQ 0 goto Error
 
 echo Deleting unused styles
@@ -157,30 +209,16 @@ rem Qt 5.x directories
 rmdir /s /q %DEPLOY_FOLDER%\QtQuick\Controls.2\Fusion
 rmdir /s /q %DEPLOY_FOLDER%\QtQuick\Controls.2\Imagine
 rmdir /s /q %DEPLOY_FOLDER%\QtQuick\Controls.2\Universal
-rem Qt 6.x directories
-rmdir /s /q %DEPLOY_FOLDER%\QtQuick\Controls\Fusion
-rmdir /s /q %DEPLOY_FOLDER%\QtQuick\Controls\Imagine
-rmdir /s /q %DEPLOY_FOLDER%\QtQuick\Controls\Universal
-
-echo Generating QML cache
-forfiles /p %DEPLOY_FOLDER% /m *.qml /s /c "cmd /c qmlcachegen.exe @path"
-if !ERRORLEVEL! NEQ 0 goto Error
-
-echo Deleting original QML files
-forfiles /p %DEPLOY_FOLDER% /m *.qml /s /c "cmd /c del @path"
-if !ERRORLEVEL! NEQ 0 goto Error
-
-echo Harvesting files for WiX
-"%WIX%\bin\heat" dir %DEPLOY_FOLDER% -srd -sfrag -ag -sw5150 -cg MoonlightDependencies -var var.SourceDir -dr INSTALLFOLDER -out %BUILD_FOLDER%\Dependencies.wxs
-if !ERRORLEVEL! NEQ 0 goto Error
-
-echo Copying application binary to deployment directory
-copy %BUILD_FOLDER%\app\%BUILD_CONFIG%\Moonlight.exe %DEPLOY_FOLDER%
-if !ERRORLEVEL! NEQ 0 goto Error
+rem Qt 6.5+ directories
+rmdir /s /q %DEPLOY_FOLDER%\qml\QtQuick\Controls\Fusion
+rmdir /s /q %DEPLOY_FOLDER%\qml\QtQuick\Controls\Imagine
+rmdir /s /q %DEPLOY_FOLDER%\qml\QtQuick\Controls\Universal
+rmdir /s /q %DEPLOY_FOLDER%\qml\QtQuick\Controls\Windows
+rmdir /s /q %DEPLOY_FOLDER%\qml\QtQuick\NativeStyle
 
 if "%SIGN%"=="1" (
     echo Signing deployed binaries
-    set FILES_TO_SIGN=
+    set FILES_TO_SIGN=%BUILD_FOLDER%\app\%BUILD_CONFIG%\Moonlight.exe
     for /r "%DEPLOY_FOLDER%" %%f in (*.dll *.exe) do (
         set FILES_TO_SIGN=!FILES_TO_SIGN! %%f
     )
@@ -192,17 +230,17 @@ if "%ML_SYMBOL_STORE%" NEQ "" (
     echo Publishing binaries to symbol store: %ML_SYMBOL_STORE%
     symstore add /r /f %DEPLOY_FOLDER%\*.* /s %ML_SYMBOL_STORE% /t Moonlight
     if !ERRORLEVEL! NEQ 0 goto Error
+    symstore add /r /f %BUILD_FOLDER%\app\%BUILD_CONFIG%\Moonlight.exe /s %ML_SYMBOL_STORE% /t Moonlight
+    if !ERRORLEVEL! NEQ 0 goto Error
 )
 
 echo Building MSI
-msbuild %SOURCE_ROOT%\wix\Moonlight\Moonlight.wixproj /p:Configuration=%BUILD_CONFIG% /p:Platform=%ARCH%
+msbuild -Restore %SOURCE_ROOT%\wix\Moonlight\Moonlight.wixproj /p:Configuration=%BUILD_CONFIG% /p:Platform=%ARCH%
 if !ERRORLEVEL! NEQ 0 goto Error
 
-if "%SIGN%"=="1" (
-    echo Signing MSI
-    signtool %SIGNTOOL_PARAMS% %BUILD_FOLDER%\Moonlight.msi
-    if !ERRORLEVEL! NEQ 0 goto Error
-)
+echo Copying application binary to deployment directory
+copy %BUILD_FOLDER%\app\%BUILD_CONFIG%\Moonlight.exe %DEPLOY_FOLDER%
+if !ERRORLEVEL! NEQ 0 goto Error
 
 echo Building portable package
 rem This must be done after WiX harvesting and signing, since the VCRT dlls are MS signed

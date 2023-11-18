@@ -99,7 +99,7 @@ CenteredGridView {
         Label {
             height: searchSpinner.height
             elide: Label.ElideRight
-            text: StreamingPreferences.enableMdns ? qsTr("Searching for PCs on your local network with NVIDIA GameStream enabled...")
+            text: StreamingPreferences.enableMdns ? qsTr("Searching for compatible hosts on your local network...")
                                                   : qsTr("Automatic PC discovery is disabled. Add your PC manually.")
             font.pointSize: 20
             verticalAlignment: Text.AlignVCenter
@@ -130,12 +130,12 @@ CenteredGridView {
             id: stateIcon
             anchors.horizontalCenter: pcIcon.horizontalCenter
             anchors.verticalCenter: pcIcon.verticalCenter
-            anchors.verticalCenterOffset: -15
+            anchors.verticalCenterOffset: !model.online ? -18 : -16
             visible: !model.statusUnknown && (!model.online || !model.paired)
-            source: !model.online ? "qrc:/res/baseline-warning-24px.svg" : "qrc:/res/baseline-lock-24px.svg"
+            source: !model.online ? "qrc:/res/warning_FILL1_wght300_GRAD200_opsz24.svg" : "qrc:/res/baseline-lock-24px.svg"
             sourceSize {
-                width: 75
-                height: 75
+                width: !model.online ? 75 : 70
+                height: !model.online ? 75 : 70
             }
         }
 
@@ -217,7 +217,7 @@ CenteredGridView {
                     text: qsTr("Delete PC")
                     onTriggered: {
                         deletePcDialog.pcIndex = index
-                        // get confirmation first, actual closing is called from the dialog
+                        deletePcDialog.pcName = model.name
                         deletePcDialog.open()
                     }
                 }
@@ -277,6 +277,12 @@ CenteredGridView {
             // the ItemDelegate and not where the mouse cursor is
             pcContextMenu.open()
         }
+
+        Keys.onDeletePressed: {
+            deletePcDialog.pcIndex = index
+            deletePcDialog.pcName = model.name
+            deletePcDialog.open()
+        }
     }
 
     ErrorMessageDialog {
@@ -297,7 +303,8 @@ CenteredGridView {
 
         // don't allow edits to the rest of the window while open
         property string pin : "0000"
-        text:qsTr("Please enter %1 on your GameStream PC. This dialog will close when pairing is completed.").arg(pin)
+        text:qsTr("Please enter %1 on your host PC. This dialog will close when pairing is completed.").arg(pin)+"\n\n"+
+             qsTr("If your host PC is running Sunshine, navigate to the Sunshine web UI to enter the PIN.")
         standardButtons: Dialog.Cancel
         onRejected: {
             // FIXME: We should interrupt pairing here
@@ -307,16 +314,14 @@ CenteredGridView {
     NavigableMessageDialog {
         id: deletePcDialog
         // don't allow edits to the rest of the window while open
-        property int pcIndex : -1;
-        text:qsTr("Are you sure you want to remove this PC?")
+        property int pcIndex : -1
+        property string pcName : ""
+        text: qsTr("Are you sure you want to remove '%1'?").arg(pcName)
         standardButtons: Dialog.Yes | Dialog.No
 
-        function deletePc() {
-            console.log("deleting PC pairing for PC at index: " + pcIndex)
-            computerModel.deleteComputer(pcIndex);
+        onAccepted: {
+            computerModel.deleteComputer(pcIndex)
         }
-
-        onAccepted: deletePc()
     }
 
     NavigableMessageDialog {
@@ -325,7 +330,7 @@ CenteredGridView {
         standardButtons: Dialog.Ok
 
         onAboutToShow: {
-            testConnectionDialog.text = qsTr("Moonlight is testing your network connection to determine if NVIDIA GameStream is blocked.") + "\n\n" + qsTr("This may take a few seconds…")
+            testConnectionDialog.text = qsTr("Moonlight is testing your network connection to determine if any required ports are blocked.") + "\n\n" + qsTr("This may take a few seconds…")
             showSpinner = true
         }
 

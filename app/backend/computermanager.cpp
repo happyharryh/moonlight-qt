@@ -13,6 +13,7 @@
 #include <random>
 
 #define SER_HOSTS "hosts"
+#define SER_HOSTS_BACKUP "hostsbackup"
 
 class PcMonitorThread : public QThread
 {
@@ -152,12 +153,21 @@ ComputerManager::ComputerManager(QObject *parent)
 {
     QSettings settings;
 
+    // If there's a hosts backup copy, we must have failed to commit
+    // a previous update before exiting. Restore the backup now.
+    int hosts = settings.beginReadArray(SER_HOSTS_BACKUP);
+    if (hosts == 0) {
+        // If there's no host backup, read from the primary location.
+        settings.endArray();
+        hosts = settings.beginReadArray(SER_HOSTS);
+    }
+
     // Inflate our hosts from QSettings
-    int hosts = settings.beginReadArray(SER_HOSTS);
     for (int i = 0; i < hosts; i++) {
         settings.setArrayIndex(i);
         NvComputer* computer = new NvComputer(settings);
         m_KnownHosts[computer->uuid] = computer;
+        m_LastSerializedHosts[computer->uuid] = *computer;
     }
     settings.endArray();
 
@@ -169,8 +179,8 @@ ComputerManager::ComputerManager(QObject *parent)
     m_DelayedFlushThread->start();
 
     // To quit in a timely manner, we must block additional requests
-    // after we receive the aboutToQuit() signal. This is neccessary
-    // because NvHTTP uses aboutToQuit() to abort requests in progres
+    // after we receive the aboutToQuit() signal. This is necessary
+    // because NvHTTP uses aboutToQuit() to abort requests in progress
     // while quitting, however this is a one time signal - additional
     // requests would not be aborted and block termination.
     connect(QCoreApplication::instance(), &QCoreApplication::aboutToQuit, this, &ComputerManager::handleAboutToQuit);
@@ -241,21 +251,48 @@ void DelayedFlushThread::run() {
 
             // Reset the delayed flush flag to ensure any racing saveHosts() call will set it again
             m_ComputerManager->m_NeedsDelayedFlush = false;
+
+            // Update the last serialized hosts map under the delayed flush mutex
+            m_ComputerManager->m_LastSerializedHosts.clear();
+            for (const NvComputer* computer : m_ComputerManager->m_KnownHosts) {
+                // Copy the current state of the NvComputer to allow us to check later if we need
+                // to serialize it again when attribute updates occur.
+                QReadLocker computerLock(&computer->lock);
+                m_ComputerManager->m_LastSerializedHosts[computer->uuid] = *computer;
+            }
         }
 
         // Perform the flush
         {
-            QReadLocker lock(&m_ComputerManager->m_Lock);
-
             QSettings settings;
-            settings.remove(SER_HOSTS);
-            settings.beginWriteArray(SER_HOSTS);
-            int i = 0;
-            for (const NvComputer* computer : m_ComputerManager->m_KnownHosts) {
-                settings.setArrayIndex(i++);
-                computer->serialize(settings);
+
+            // First, write to the backup location
+            settings.beginWriteArray(SER_HOSTS_BACKUP);
+            {
+                QReadLocker lock(&m_ComputerManager->m_Lock);
+                int i = 0;
+                for (const NvComputer* computer : m_ComputerManager->m_KnownHosts) {
+                    settings.setArrayIndex(i++);
+                    computer->serialize(settings, false);
+                }
             }
             settings.endArray();
+
+            // Next, write to the primary location
+            settings.remove(SER_HOSTS);
+            settings.beginWriteArray(SER_HOSTS);
+            {
+                QReadLocker lock(&m_ComputerManager->m_Lock);
+                int i = 0;
+                for (const NvComputer* computer : m_ComputerManager->m_KnownHosts) {
+                    settings.setArrayIndex(i++);
+                    computer->serialize(settings, true);
+                }
+            }
+            settings.endArray();
+
+            // Finally, delete the backup copy
+            settings.remove(SER_HOSTS_BACKUP);
         }
     }
 }
@@ -319,12 +356,13 @@ void ComputerManager::startPolling()
 
     if (prefs.enableMdns) {
         // Start an MDNS query for GameStream hosts
-        m_MdnsBrowser = new QMdnsEngine::Browser(&m_MdnsServer, "_nvstream._tcp.local.", &m_MdnsCache);
+        m_MdnsServer.reset(new QMdnsEngine::Server());
+        m_MdnsBrowser = new QMdnsEngine::Browser(m_MdnsServer.data(), "_nvstream._tcp.local.");
         connect(m_MdnsBrowser, &QMdnsEngine::Browser::serviceAdded,
                 this, [this](const QMdnsEngine::Service& service) {
             qInfo() << "Discovered mDNS host:" << service.hostname();
 
-            MdnsPendingComputer* pendingComputer = new MdnsPendingComputer(&m_MdnsServer, service);
+            MdnsPendingComputer* pendingComputer = new MdnsPendingComputer(m_MdnsServer, service);
             connect(pendingComputer, &MdnsPendingComputer::resolvedHost,
                     this, &ComputerManager::handleMdnsServiceResolved);
             m_PendingResolution.append(pendingComputer);
@@ -405,6 +443,19 @@ void ComputerManager::handleMdnsServiceResolved(MdnsPendingComputer* computer,
     computer->deleteLater();
 }
 
+void ComputerManager::saveHost(NvComputer *computer)
+{
+    // If no serializable properties changed, don't bother saving hosts
+    QMutexLocker lock(&m_DelayedFlushMutex);
+    QReadLocker computerLock(&computer->lock);
+    if (!m_LastSerializedHosts.value(computer->uuid).isEqualSerialized(*computer)) {
+        // Queue a request for a delayed flush to QSettings outside of the lock
+        computerLock.unlock();
+        lock.unlock();
+        saveHosts();
+    }
+}
+
 void ComputerManager::handleComputerStateChanged(NvComputer* computer)
 {
     emit computerStateChanged(computer);
@@ -414,15 +465,20 @@ void ComputerManager::handleComputerStateChanged(NvComputer* computer)
         emit quitAppCompleted(QVariant());
     }
 
-    // Save updated hosts to QSettings
-    saveHosts();
+    // Save updates to this host
+    saveHost(computer);
 }
 
 QVector<NvComputer*> ComputerManager::getComputers()
 {
     QReadLocker lock(&m_Lock);
 
-    return QVector<NvComputer*>::fromList(m_KnownHosts.values());
+    // Return a sorted host list
+    auto hosts = QVector<NvComputer*>::fromList(m_KnownHosts.values());
+    std::stable_sort(hosts.begin(), hosts.end(), [](const NvComputer* host1, const NvComputer* host2) {
+        return host1->name.toLower() < host2->name.toLower();
+    });
+    return hosts;
 }
 
 class DeferredHostDeletionTask : public QRunnable
@@ -446,7 +502,7 @@ public:
             m_ComputerManager->m_KnownHosts.remove(m_Computer->uuid);
         }
 
-        // Persist the new host list
+        // Persist the new host list with this computer deleted
         m_ComputerManager->saveHosts();
 
         // Delete the polling entry first. This will stop all polling threads too.
@@ -487,9 +543,6 @@ void ComputerManager::renameHost(NvComputer* computer, QString name)
 
 void ComputerManager::clientSideAttributeUpdated(NvComputer* computer)
 {
-    // Persist the change
-    saveHosts();
-
     // Notify the UI of the state change
     handleComputerStateChanged(computer);
 }
@@ -547,7 +600,7 @@ private:
                break;
            case NvPairingManager::PairState::PAIRED:
                // Persist the newly pinned server certificate for this host
-               m_ComputerManager->saveHosts();
+               m_ComputerManager->saveHost(m_Computer);
 
                emit pairingCompleted(m_Computer, nullptr);
                break;
@@ -646,9 +699,10 @@ void ComputerManager::stopPollingAsync()
         m_PendingResolution.removeFirst();
     }
 
-    // Delete the browser to stop discovery
+    // Delete the browser and server to stop discovery and refresh polling
     delete m_MdnsBrowser;
     m_MdnsBrowser = nullptr;
+    m_MdnsServer.reset();
 
     // Interrupt all threads, but don't wait for them to terminate
     for (ComputerPollingEntry* entry : m_PollEntries) {
@@ -658,8 +712,8 @@ void ComputerManager::stopPollingAsync()
 
 void ComputerManager::addNewHostManually(QString address)
 {
-    QUrl url = QUrl::fromUserInput(address);
-    if (url.isValid() && !url.host().isEmpty()) {
+    QUrl url = QUrl::fromUserInput("moonlight://" + address);
+    if (url.isValid() && !url.host().isEmpty() && url.scheme() == "moonlight") {
         // If there wasn't a port specified, use the default
         addNewHost(NvAddress(url.host(), url.port(DEFAULT_HTTP_PORT)), false);
     }

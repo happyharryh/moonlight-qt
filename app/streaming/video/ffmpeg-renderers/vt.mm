@@ -38,6 +38,8 @@ public:
         : m_HwContext(nullptr),
           m_DisplayLayer(nullptr),
           m_FormatDesc(nullptr),
+          m_ContentLightLevelInfo(nullptr),
+          m_MasteringDisplayColorVolume(nullptr),
           m_StreamView(nullptr),
           m_DisplayLink(nullptr),
           m_LastColorSpace(-1),
@@ -54,7 +56,7 @@ public:
     }
 
     virtual ~VTRenderer() override
-    {
+    { @autoreleasepool {
         // We may have overlay update blocks enqueued for execution.
         // We must cancel those to avoid a UAF.
         for (int i = 0; i < Overlay::OverlayMax; i++) {
@@ -87,16 +89,34 @@ public:
             CGColorSpaceRelease(m_ColorSpace);
         }
 
+        if (m_MasteringDisplayColorVolume != nullptr) {
+            CFRelease(m_MasteringDisplayColorVolume);
+        }
+
+        if (m_ContentLightLevelInfo != nullptr) {
+            CFRelease(m_ContentLightLevelInfo);
+        }
+
         for (int i = 0; i < Overlay::OverlayMax; i++) {
             if (m_OverlayTextFields[i] != nullptr) {
                 [m_OverlayTextFields[i] removeFromSuperview];
+                [m_OverlayTextFields[i] release];
             }
         }
 
         if (m_StreamView != nullptr) {
             [m_StreamView removeFromSuperview];
+            [m_StreamView release];
         }
-    }
+
+        if (m_DisplayLayer != nullptr) {
+            [m_DisplayLayer release];
+        }
+
+        // It appears to be necessary to run the event loop after destroying
+        // the AVSampleBufferDisplayLayer to avoid issue #973.
+        SDL_PumpEvents();
+    }}
 
     static
     CVReturn
@@ -183,9 +203,66 @@ public:
         }
     }
 
+    virtual void setHdrMode(bool enabled) override
+    {
+        // Free existing HDR metadata
+        if (m_MasteringDisplayColorVolume != nullptr) {
+            CFRelease(m_MasteringDisplayColorVolume);
+            m_MasteringDisplayColorVolume = nullptr;
+        }
+        if (m_ContentLightLevelInfo != nullptr) {
+            CFRelease(m_ContentLightLevelInfo);
+            m_ContentLightLevelInfo = nullptr;
+        }
+
+        // Store new HDR metadata if available
+        SS_HDR_METADATA hdrMetadata;
+        if (enabled && LiGetHdrMetadata(&hdrMetadata)) {
+            if (hdrMetadata.displayPrimaries[0].x != 0 && hdrMetadata.maxDisplayLuminance != 0) {
+                // This data is all in big-endian
+                struct {
+                  vector_ushort2 primaries[3];
+                  vector_ushort2 white_point;
+                  uint32_t luminance_max;
+                  uint32_t luminance_min;
+                } __attribute__((packed, aligned(4))) mdcv;
+
+                // mdcv is in GBR order while SS_HDR_METADATA is in RGB order
+                mdcv.primaries[0].x = __builtin_bswap16(hdrMetadata.displayPrimaries[1].x);
+                mdcv.primaries[0].y = __builtin_bswap16(hdrMetadata.displayPrimaries[1].y);
+                mdcv.primaries[1].x = __builtin_bswap16(hdrMetadata.displayPrimaries[2].x);
+                mdcv.primaries[1].y = __builtin_bswap16(hdrMetadata.displayPrimaries[2].y);
+                mdcv.primaries[2].x = __builtin_bswap16(hdrMetadata.displayPrimaries[0].x);
+                mdcv.primaries[2].y = __builtin_bswap16(hdrMetadata.displayPrimaries[0].y);
+
+                mdcv.white_point.x = __builtin_bswap16(hdrMetadata.whitePoint.x);
+                mdcv.white_point.y = __builtin_bswap16(hdrMetadata.whitePoint.y);
+
+                // These luminance values are in 10000ths of a nit
+                mdcv.luminance_max = __builtin_bswap32((uint32_t)hdrMetadata.maxDisplayLuminance * 10000);
+                mdcv.luminance_min = __builtin_bswap32(hdrMetadata.minDisplayLuminance);
+
+                m_MasteringDisplayColorVolume = CFDataCreate(nullptr, (const UInt8*)&mdcv, sizeof(mdcv));
+            }
+
+            if (hdrMetadata.maxContentLightLevel != 0 && hdrMetadata.maxFrameAverageLightLevel != 0) {
+                // This data is all in big-endian
+                struct {
+                    uint16_t max_content_light_level;
+                    uint16_t max_frame_average_light_level;
+                } __attribute__((packed, aligned(2))) cll;
+
+                cll.max_content_light_level = __builtin_bswap16(hdrMetadata.maxContentLightLevel);
+                cll.max_frame_average_light_level = __builtin_bswap16(hdrMetadata.maxFrameAverageLightLevel);
+
+                m_ContentLightLevelInfo = CFDataCreate(nullptr, (const UInt8*)&cll, sizeof(cll));
+            }
+        }
+    }
+
     // Caller frees frame after we return
     virtual void renderFrame(AVFrame* frame) override
-    {
+    { @autoreleasepool {
         OSStatus status;
         CVPixelBufferRef pixBuf = reinterpret_cast<CVPixelBufferRef>(frame->data[3]);
 
@@ -224,7 +301,18 @@ public:
                 m_ColorSpace = CGColorSpaceCreateWithName(kCGColorSpaceITUR_709);
                 break;
             case COLORSPACE_REC_2020:
-                m_ColorSpace = CGColorSpaceCreateWithName(kCGColorSpaceITUR_2020);
+                // This is necessary to ensure HDR works properly with external displays on macOS Sonoma.
+                if (frame->color_trc == AVCOL_TRC_SMPTE2084) {
+                    if (@available(macOS 11.0, *)) {
+                        m_ColorSpace = CGColorSpaceCreateWithName(kCGColorSpaceITUR_2100_PQ);
+                    }
+                    else {
+                        m_ColorSpace = CGColorSpaceCreateWithName(kCGColorSpaceITUR_2020);
+                    }
+                }
+                else {
+                    m_ColorSpace = CGColorSpaceCreateWithName(kCGColorSpaceITUR_2020);
+                }
                 break;
             case COLORSPACE_REC_601:
                 m_ColorSpace = CGColorSpaceCreateWithName(kCGColorSpaceSRGB);
@@ -236,6 +324,14 @@ public:
 
         if (m_ColorSpace != nullptr) {
             CVBufferSetAttachment(pixBuf, kCVImageBufferCGColorSpaceKey, m_ColorSpace, kCVAttachmentMode_ShouldPropagate);
+        }
+
+        // Attach HDR metadata if it has been provided by the host
+        if (m_MasteringDisplayColorVolume != nullptr) {
+            CVBufferSetAttachment(pixBuf, kCVImageBufferMasteringDisplayColorVolumeKey, m_MasteringDisplayColorVolume, kCVAttachmentMode_ShouldPropagate);
+        }
+        if (m_ContentLightLevelInfo != nullptr) {
+            CVBufferSetAttachment(pixBuf, kCVImageBufferContentLightLevelInfoKey, m_ContentLightLevelInfo, kCVAttachmentMode_ShouldPropagate);
         }
 
         // If the format has changed or doesn't exist yet, construct it with the
@@ -277,10 +373,10 @@ public:
         [m_DisplayLayer enqueueSampleBuffer:sampleBuffer];
 
         CFRelease(sampleBuffer);
-    }
+    }}
 
     virtual bool initialize(PDECODER_PARAMETERS params) override
-    {
+    { @autoreleasepool {
         int err;
 
         if (params->videoFormat & VIDEO_FORMAT_MASK_H264) {
@@ -342,72 +438,22 @@ public:
                 [device release];
             }
         }
-
-        SDL_SysWMinfo info;
-
-        SDL_VERSION(&info.version);
-
-        if (!SDL_GetWindowWMInfo(params->window, &info)) {
-            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
-                        "SDL_GetWindowWMInfo() failed: %s",
-                        SDL_GetError());
-            return false;
-        }
-
-        SDL_assert(info.subsystem == SDL_SYSWM_COCOA);
-
-        // SDL adds its own content view to listen for events.
-        // We need to add a subview for our display layer.
-        NSView* contentView = info.info.cocoa.window.contentView;
-        m_StreamView = [[VTView alloc] initWithFrame:contentView.bounds];
-
-        m_DisplayLayer = [[AVSampleBufferDisplayLayer alloc] init];
-        m_DisplayLayer.bounds = m_StreamView.bounds;
-        m_DisplayLayer.position = CGPointMake(CGRectGetMidX(m_StreamView.bounds), CGRectGetMidY(m_StreamView.bounds));
-        m_DisplayLayer.videoGravity = AVLayerVideoGravityResizeAspect;
-        m_DisplayLayer.opaque = YES;
-
-        // This workaround prevents the image from going through processing that causes some
-        // color artifacts in some cases. HDR seems to be okay without this, so we'll exclude
-        // it out of caution. The artifacts seem to be far more significant on M1 Macs and
-        // the workaround can cause performance regressions on Intel Macs, so only use this
-        // on Apple silicon.
-        //
-        // https://github.com/moonlight-stream/moonlight-qt/issues/493
-        // https://github.com/moonlight-stream/moonlight-qt/issues/722
-        if (!(params->videoFormat & VIDEO_FORMAT_MASK_10BIT)) {
-            int err;
-            uint32_t cpuType;
-            size_t size = sizeof(cpuType);
-
-            // Apple Silicon Macs have CPU_ARCH_ABI64 set, so we need to mask that off.
-            // For some reason, 64-bit Intel Macs don't seem to have CPU_ARCH_ABI64 set.
-            err = sysctlbyname("hw.cputype", &cpuType, &size, NULL, 0);
-            if (err == 0 && (cpuType & ~CPU_ARCH_MASK) == CPU_TYPE_ARM) {
-                if (info.info.cocoa.window.screen != nullptr) {
-                    m_DisplayLayer.shouldRasterize = YES;
-                    m_DisplayLayer.rasterizationScale = info.info.cocoa.window.screen.backingScaleFactor;
-                }
-                else {
-                    SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
-                                "Unable to rasterize layer due to missing NSScreen");
-                    SDL_assert(false);
-                }
-            }
-            else if (err != 0) {
+        else if (params->videoFormat & VIDEO_FORMAT_MASK_AV1) {
+        #if __MAC_OS_X_VERSION_MAX_ALLOWED >= 130000
+            if (!VTIsHardwareDecodeSupported(kCMVideoCodecType_AV1)) {
                 SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
-                            "sysctlbyname(hw.cputype) failed: %d", err);
+                            "No HW accelerated AV1 decode via VT");
+                return false;
             }
+
+            // 10-bit is part of the Main profile for AV1, so it will always
+            // be present on hardware that supports 8-bit.
+        #else
+            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                        "AV1 requires building with Xcode 14 or later");
+            return false;
+        #endif
         }
-
-        // Create a layer-hosted view by setting the layer before wantsLayer
-        // This avoids us having to add our AVSampleBufferDisplayLayer as a
-        // sublayer of a layer-backed view which leaves a useless layer in
-        // the middle.
-        m_StreamView.layer = m_DisplayLayer;
-        m_StreamView.wantsLayer = YES;
-
-        [contentView addSubview: m_StreamView];
 
         err = av_hwdevice_ctx_create(&m_HwContext,
                                      AV_HWDEVICE_TYPE_VIDEOTOOLBOX,
@@ -421,17 +467,101 @@ public:
             return false;
         }
 
-        if (params->enableFramePacing) {
-            if (!initializeVsyncCallback(&info)) {
+        bool isAppleSilicon = false;
+        {
+            uint32_t cpuType;
+            size_t size = sizeof(cpuType);
+
+            err = sysctlbyname("hw.cputype", &cpuType, &size, NULL, 0);
+            if (err == 0) {
+                // Apple Silicon Macs have CPU_ARCH_ABI64 set, so we need to mask that off.
+                // For some reason, 64-bit Intel Macs don't seem to have CPU_ARCH_ABI64 set.
+                isAppleSilicon = (cpuType & ~CPU_ARCH_MASK) == CPU_TYPE_ARM;
+            }
+            else {
+                SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                            "sysctlbyname(hw.cputype) failed: %d", err);
+            }
+        }
+
+        if (qgetenv("VT_FORCE_INDIRECT") == "1") {
+            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                        "Using indirect rendering due to environment variable");
+            m_DirectRendering = false;
+        }
+        else {
+            m_DirectRendering = true;
+        }
+
+        // If we're using direct rendering, set up the AVSampleBufferDisplayLayer
+        if (m_DirectRendering) {
+            SDL_SysWMinfo info;
+
+            SDL_VERSION(&info.version);
+
+            if (!SDL_GetWindowWMInfo(params->window, &info)) {
+                SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                            "SDL_GetWindowWMInfo() failed: %s",
+                            SDL_GetError());
                 return false;
+            }
+
+            SDL_assert(info.subsystem == SDL_SYSWM_COCOA);
+
+            // SDL adds its own content view to listen for events.
+            // We need to add a subview for our display layer.
+            NSView* contentView = info.info.cocoa.window.contentView;
+            m_StreamView = [[VTView alloc] initWithFrame:contentView.bounds];
+
+            m_DisplayLayer = [[AVSampleBufferDisplayLayer alloc] init];
+            m_DisplayLayer.bounds = m_StreamView.bounds;
+            m_DisplayLayer.position = CGPointMake(CGRectGetMidX(m_StreamView.bounds), CGRectGetMidY(m_StreamView.bounds));
+            m_DisplayLayer.videoGravity = AVLayerVideoGravityResizeAspect;
+            m_DisplayLayer.opaque = YES;
+
+            // This workaround prevents the image from going through processing that causes some
+            // color artifacts in some cases. HDR seems to be okay without this, so we'll exclude
+            // it out of caution. The artifacts seem to be far more significant on M1 Macs and
+            // the workaround can cause performance regressions on Intel Macs, so only use this
+            // on Apple silicon.
+            //
+            // https://github.com/moonlight-stream/moonlight-qt/issues/493
+            // https://github.com/moonlight-stream/moonlight-qt/issues/722
+            if (isAppleSilicon && !(params->videoFormat & VIDEO_FORMAT_MASK_10BIT)) {
+                SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                            "Using layer rasterization workaround");
+                if (info.info.cocoa.window.screen != nullptr) {
+                    m_DisplayLayer.shouldRasterize = YES;
+                    m_DisplayLayer.rasterizationScale = info.info.cocoa.window.screen.backingScaleFactor;
+                }
+                else {
+                    SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                                "Unable to rasterize layer due to missing NSScreen");
+                    SDL_assert(false);
+                }
+            }
+
+            // Create a layer-hosted view by setting the layer before wantsLayer
+            // This avoids us having to add our AVSampleBufferDisplayLayer as a
+            // sublayer of a layer-backed view which leaves a useless layer in
+            // the middle.
+            m_StreamView.layer = m_DisplayLayer;
+            m_StreamView.wantsLayer = YES;
+
+            [contentView addSubview: m_StreamView];
+
+            if (params->enableFramePacing) {
+                if (!initializeVsyncCallback(&info)) {
+                    return false;
+                }
             }
         }
 
         return true;
-    }
+    }}
 
     void updateOverlayOnMainThread(Overlay::OverlayType type)
-    {
+    { @autoreleasepool {
         // Lazy initialization for the overlay
         if (m_OverlayTextFields[type] == nullptr) {
             m_OverlayTextFields[type] = [[NSTextField alloc] initWithFrame:m_StreamView.bounds];
@@ -463,7 +593,7 @@ public:
 
         // Unhide if it's enabled
         [m_OverlayTextFields[type] setHidden: !Session::get()->getOverlayManager().isOverlayEnabled(type)];
-    }
+    }}
 
     virtual void notifyOverlayUpdated(Overlay::OverlayType type) override
     {
@@ -499,7 +629,8 @@ public:
 
     int getDecoderCapabilities() override
     {
-        return CAPABILITY_REFERENCE_FRAME_INVALIDATION_HEVC;
+        return CAPABILITY_REFERENCE_FRAME_INVALIDATION_HEVC |
+               CAPABILITY_REFERENCE_FRAME_INVALIDATION_AV1;
     }
 
     int getRendererAttributes() override
@@ -508,10 +639,17 @@ public:
         return RENDERER_ATTRIBUTE_HDR_SUPPORT;
     }
 
+    bool isDirectRenderingSupported() override
+    {
+        return m_DirectRendering;
+    }
+
 private:
     AVBufferRef* m_HwContext;
     AVSampleBufferDisplayLayer* m_DisplayLayer;
     CMVideoFormatDescriptionRef m_FormatDesc;
+    CFDataRef m_ContentLightLevelInfo;
+    CFDataRef m_MasteringDisplayColorVolume;
     NSView* m_StreamView;
     dispatch_block_t m_OverlayUpdateBlocks[Overlay::OverlayMax];
     NSTextField* m_OverlayTextFields[Overlay::OverlayMax];
@@ -520,6 +658,7 @@ private:
     CGColorSpaceRef m_ColorSpace;
     SDL_mutex* m_VsyncMutex;
     SDL_cond* m_VsyncPassed;
+    bool m_DirectRendering;
 };
 
 IFFmpegRenderer* VTRendererFactory::createRenderer() {

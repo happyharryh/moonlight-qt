@@ -6,10 +6,6 @@
 
 #include <SDL.h>
 
-#define SDL_CODE_HIDE_CURSOR 1
-#define SDL_CODE_SHOW_CURSOR 2
-#define SDL_CODE_UNCAPTURE_MOUSE 3
-
 struct GamepadState {
     SDL_GameController* controller;
     SDL_JoystickID jsId;
@@ -24,7 +20,20 @@ struct GamepadState {
     SDL_TimerID mouseEmulationTimer;
     uint32_t lastStartDownTime;
 
-    short buttons;
+    bool clickpadButtonEmulationEnabled;
+    bool emulatedClickpadButtonDown;
+
+#if SDL_VERSION_ATLEAST(2, 0, 14)
+    uint8_t gyroReportPeriodMs;
+    float lastGyroEventData[SDL_arraysize(SDL_ControllerSensorEvent::data)];
+    uint32_t lastGyroEventTime;
+
+    uint8_t accelReportPeriodMs;
+    float lastAccelEventData[SDL_arraysize(SDL_ControllerSensorEvent::data)];
+    uint32_t lastAccelEventTime;
+#endif
+
+    int buttons;
     short lsX, lsY;
     short rsX, rsY;
     unsigned char lt, rt;
@@ -43,7 +52,9 @@ struct GamepadState {
     } cal;
 };
 
-#define MAX_GAMEPADS 4
+// activeGamepadMask is a short, so we're bounded by the number of mask bits
+#define MAX_GAMEPADS 16
+
 #define MAX_FINGERS 2
 
 #define GAMEPAD_HAPTIC_METHOD_NONE 0
@@ -56,8 +67,7 @@ struct GamepadState {
 class SdlInputHandler
 {
 public:
-    explicit SdlInputHandler(StreamingPreferences& prefs, NvComputer* computer,
-                             int streamWidth, int streamHeight);
+    explicit SdlInputHandler(StreamingPreferences& prefs, int streamWidth, int streamHeight);
 
     ~SdlInputHandler();
 
@@ -75,15 +85,29 @@ public:
 
     void handleControllerButtonEvent(SDL_ControllerButtonEvent* event);
 
+    void handleControllerDeviceEvent(SDL_ControllerDeviceEvent* event);
+
+#if SDL_VERSION_ATLEAST(2, 0, 14)
     void handleControllerSensorEvent(SDL_ControllerSensorEvent* event);
 
-    void handleControllerDeviceEvent(SDL_ControllerDeviceEvent* event);
+    void handleControllerTouchpadEvent(SDL_ControllerTouchpadEvent* event);
+#endif
+
+#if SDL_VERSION_ATLEAST(2, 24, 0)
+    void handleJoystickBatteryEvent(SDL_JoyBatteryEvent* event);
+#endif
 
     void handleJoystickArrivalEvent(SDL_JoyDeviceEvent* event);
 
     void sendText(QString& string);
 
-    void rumble(unsigned short controllerNumber, unsigned short lowFreqMotor, unsigned short highFreqMotor);
+    void rumble(uint16_t controllerNumber, uint16_t lowFreqMotor, uint16_t highFreqMotor);
+
+    void rumbleTriggers(uint16_t controllerNumber, uint16_t leftTrigger, uint16_t rightTrigger);
+
+    void setMotionEventState(uint16_t controllerNumber, uint8_t motionType, uint16_t reportRateHz);
+
+    void setControllerLED(uint16_t controllerNumber, uint8_t r, uint8_t g, uint8_t b);
 
     void handleTouchFingerEvent(SDL_TouchFingerEvent* event);
 
@@ -102,10 +126,6 @@ public:
     void setCaptureActive(bool active);
 
     bool isMouseInVideoRegion(int mouseX, int mouseY, int windowWidth = -1, int windowHeight = -1);
-
-    void updateMousePositionReport(int mouseX, int mouseY);
-
-    void flushMousePositionUpdate();
 
     void updateKeyboardGrabState();
 
@@ -133,7 +153,13 @@ private:
 
     void sendGamepadState(GamepadState* state);
 
+    void sendGamepadBatteryState(GamepadState* state, SDL_JoystickPowerLevel level);
+
     void handleAbsoluteFingerEvent(SDL_TouchFingerEvent* event);
+
+    void emulateAbsoluteFingerEvent(SDL_TouchFingerEvent* event);
+
+    void disableTouchFeedback();
 
     void handleRelativeFingerEvent(SDL_TouchFingerEvent* event);
 
@@ -141,9 +167,6 @@ private:
 
     static
     Uint32 longPressTimerCallback(Uint32 interval, void* param);
-
-    static
-    Uint32 mouseMoveTimerCallback(Uint32 interval, void* param);
 
     static
     Uint32 mouseEmulationTimerCallback(Uint32 interval, void* param);
@@ -163,16 +186,7 @@ private:
     bool m_SwapMouseButtons;
     bool m_ReverseScrollDirection;
     bool m_SwapFaceButtons;
-    SDL_TimerID m_MouseMoveTimer;
-    SDL_atomic_t m_MouseDeltaX;
-    SDL_atomic_t m_MouseDeltaY;
 
-    SDL_SpinLock m_MousePositionLock;
-    struct {
-        int x, y;
-        int windowWidth, windowHeight;
-    } m_MousePositionReport;
-    SDL_atomic_t m_MousePositionUpdated;
     bool m_MouseWasInVideoRegion;
     bool m_PendingMouseButtonsAllUpOnVideoRegionLeave;
     bool m_PointerRegionLockActive;
@@ -184,6 +198,7 @@ private:
     bool m_FakeCaptureActive;
     QString m_OldIgnoreDevices;
     QString m_OldIgnoreDevicesExcept;
+    QStringList m_IgnoreDeviceGuids;
     StreamingPreferences::CaptureSysKeysMode m_CaptureSystemKeysMode;
     int m_MouseCursorCapturedVisibilityState;
 
@@ -201,6 +216,7 @@ private:
     int m_StreamHeight;
     bool m_AbsoluteMouseMode;
     bool m_AbsoluteTouchMode;
+    bool m_DisabledTouchFeedback;
 
     SDL_TouchFingerEvent m_TouchDownEvent[MAX_FINGERS];
     SDL_TimerID m_LeftButtonReleaseTimer;

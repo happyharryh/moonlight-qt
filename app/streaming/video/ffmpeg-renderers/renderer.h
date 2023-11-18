@@ -40,6 +40,10 @@ typedef EGLBoolean (EGLAPIENTRYP PFNEGLDESTROYIMAGEPROC) (EGLDisplay dpy, EGLIma
 typedef EGLDisplay (EGLAPIENTRYP PFNEGLGETPLATFORMDISPLAYPROC) (EGLenum platform, void *native_display, const EGLAttrib *attrib_list);
 #endif
 
+#ifndef EGL_KHR_stream
+typedef uint64_t EGLuint64KHR;
+#endif
+
 #if !defined(EGL_KHR_image) || !defined(EGL_EGLEXT_PROTOTYPES)
 // EGL_KHR_image technically uses EGLImageKHR instead of EGLImage, but they're compatible
 // so we swap them here to avoid mixing them all over the place
@@ -94,6 +98,11 @@ typedef EGLSyncKHR (EGLAPIENTRYP PFNEGLCREATESYNCKHRPROC) (EGLDisplay dpy, EGLen
 #define EGL_DMA_BUF_PLANE3_MODIFIER_HI_EXT 0x344A
 #endif
 
+#if !defined(EGL_EXT_image_dma_buf_import_modifiers) || !defined(EGL_EGLEXT_PROTOTYPES)
+typedef EGLBoolean (EGLAPIENTRYP PFNEGLQUERYDMABUFFORMATSEXTPROC) (EGLDisplay dpy, EGLint max_formats, EGLint *formats, EGLint *num_formats);
+typedef EGLBoolean (EGLAPIENTRYP PFNEGLQUERYDMABUFMODIFIERSEXTPROC) (EGLDisplay dpy, EGLint format, EGLint max_modifiers, EGLuint64KHR *modifiers, EGLBoolean *external_only, EGLint *num_modifiers);
+#endif
+
 #define EGL_MAX_PLANES 4
 
 class EGLExtensions {
@@ -138,6 +147,7 @@ public:
         return true;
     }
 
+    // NOTE: This can be called BEFORE initialize()!
     virtual bool needsTestFrame() {
         // No test frame required by default
         return false;
@@ -249,7 +259,7 @@ public:
         return -1;
     }
 
-    // Free the ressources allocated during the last `exportEGLImages` call
+    // Free the resources allocated during the last `exportEGLImages` call
     virtual void freeEGLImages(EGLDisplay, EGLImage[EGL_MAX_PLANES]) {}
 #endif
 

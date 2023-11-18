@@ -9,16 +9,12 @@
 #include <QDir>
 #include <QGuiApplication>
 
-#define MOUSE_POLLING_INTERVAL 5
-
-SdlInputHandler::SdlInputHandler(StreamingPreferences& prefs, NvComputer*, int streamWidth, int streamHeight)
+SdlInputHandler::SdlInputHandler(StreamingPreferences& prefs, int streamWidth, int streamHeight)
     : m_MultiController(prefs.multiController),
       m_GamepadMouse(prefs.gamepadMouse),
       m_SwapMouseButtons(prefs.swapMouseButtons),
       m_ReverseScrollDirection(prefs.reverseScrollDirection),
       m_SwapFaceButtons(prefs.swapFaceButtons),
-      m_MouseMoveTimer(0),
-      m_MousePositionLock(0),
       m_MouseWasInVideoRegion(false),
       m_PendingMouseButtonsAllUpOnVideoRegionLeave(false),
       m_PointerRegionLockActive(false),
@@ -31,6 +27,7 @@ SdlInputHandler::SdlInputHandler(StreamingPreferences& prefs, NvComputer*, int s
       m_StreamHeight(streamHeight),
       m_AbsoluteMouseMode(prefs.absoluteMouseMode),
       m_AbsoluteTouchMode(prefs.absoluteTouchMode),
+      m_DisabledTouchFeedback(false),
       m_LeftButtonReleaseTimer(0),
       m_RightButtonReleaseTimer(0),
       m_DragTimer(0),
@@ -134,6 +131,20 @@ SdlInputHandler::SdlInputHandler(StreamingPreferences& prefs, NvComputer*, int s
     }
     streamIgnoreDevices += m_OldIgnoreDevices;
 
+    // STREAM_IGNORE_DEVICE_GUIDS allows to specify additional devices to be ignored when starting
+    // the stream in case the scope of STREAM_GAMECONTROLLER_IGNORE_DEVICES is too broad. One such
+    // case is "Steam Virtual Gamepad" where everything is under the same VID/PID, but different GUIDs.
+    // Multiple GUIDs can be provided, but need to be separated by commas:
+    //
+    //     <GUID>,<GUID>,<GUID>,...
+    //
+    QString streamIgnoreDeviceGuids = qgetenv("STREAM_IGNORE_DEVICE_GUIDS");
+#if QT_VERSION >= QT_VERSION_CHECK(5, 14, 0)
+    m_IgnoreDeviceGuids = streamIgnoreDeviceGuids.split(',', Qt::SkipEmptyParts);
+#else
+    m_IgnoreDeviceGuids = streamIgnoreDeviceGuids.split(',', QString::SkipEmptyParts);
+#endif
+
     // For SDL_HINT_GAMECONTROLLER_IGNORE_DEVICES, we use the union of SDL_GAMECONTROLLER_IGNORE_DEVICES
     // and STREAM_GAMECONTROLLER_IGNORE_DEVICES while streaming. STREAM_GAMECONTROLLER_IGNORE_DEVICES_EXCEPT
     // overrides SDL_GAMECONTROLLER_IGNORE_DEVICES_EXCEPT while streaming.
@@ -194,23 +205,6 @@ SdlInputHandler::SdlInputHandler(StreamingPreferences& prefs, NvComputer*, int s
     SDL_zero(m_LastTouchDownEvent);
     SDL_zero(m_LastTouchUpEvent);
     SDL_zero(m_TouchDownEvent);
-    SDL_zero(m_MousePositionReport);
-
-    SDL_AtomicSet(&m_MouseDeltaX, 0);
-    SDL_AtomicSet(&m_MouseDeltaY, 0);
-    SDL_AtomicSet(&m_MousePositionUpdated, 0);
-
-    Uint32 pollingInterval = QString(qgetenv("MOUSE_POLLING_INTERVAL")).toUInt();
-    if (pollingInterval == 0) {
-        pollingInterval = MOUSE_POLLING_INTERVAL;
-    }
-    else {
-        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
-                    "Using custom mouse polling interval: %u ms",
-                    pollingInterval);
-    }
-
-    m_MouseMoveTimer = SDL_AddTimer(pollingInterval, SdlInputHandler::mouseMoveTimerCallback, this);
 
     if (m_CemuhookServer) {
         Cemuhook::Server::init();
@@ -234,7 +228,6 @@ SdlInputHandler::~SdlInputHandler()
         }
     }
 
-    SDL_RemoveTimer(m_MouseMoveTimer);
     SDL_RemoveTimer(m_LongPressTimer);
     SDL_RemoveTimer(m_LeftButtonReleaseTimer);
     SDL_RemoveTimer(m_RightButtonReleaseTimer);
@@ -415,7 +408,14 @@ void SdlInputHandler::setCaptureActive(bool active)
             mouseY -= windowY;
 
             if (isMouseInVideoRegion(mouseX, mouseY)) {
-                updateMousePositionReport(mouseX, mouseY);
+                // Synthesize a mouse event to synchronize the cursor
+                SDL_MouseMotionEvent motionEvent = {};
+                motionEvent.type = SDL_MOUSEMOTION;
+                motionEvent.timestamp = SDL_GetTicks();
+                motionEvent.windowID = SDL_GetWindowID(m_Window);
+                motionEvent.x = mouseX;
+                motionEvent.y = mouseY;
+                handleMouseMotionEvent(&motionEvent);
             }
         }
     }

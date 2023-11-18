@@ -6,6 +6,7 @@ import Session 1.0
 
 Item {
     property string appName
+    property var quitRunningAppFn
     property Session nextSession : null
     property string nextAppName : ""
 
@@ -17,6 +18,7 @@ Item {
         if (error !== undefined) {
             errorDialog.text = error
             errorDialog.open()
+            console.error(error)
         }
 
         // If we're supposed to launch another game after this, do so now
@@ -37,6 +39,11 @@ Item {
 
         // Connect the quit completion signal
         ComputerManager.quitAppCompleted.connect(quitAppCompleted)
+
+        // Start the quit operation if requested
+        if (quitRunningAppFn) {
+            quitRunningAppFn()
+        }
     }
 
     StackView.onDeactivating: {

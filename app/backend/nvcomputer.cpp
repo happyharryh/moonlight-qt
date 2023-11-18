@@ -74,7 +74,7 @@ void NvComputer::setRemoteAddress(QHostAddress address)
     this->remoteAddress = NvAddress(address, this->externalPort);
 }
 
-void NvComputer::serialize(QSettings& settings) const
+void NvComputer::serialize(QSettings& settings, bool serializeApps) const
 {
     QReadLocker lock(&this->lock);
 
@@ -94,7 +94,7 @@ void NvComputer::serialize(QSettings& settings) const
     settings.setValue(SER_NVIDIASOFTWARE, isNvidiaServerSoftware);
 
     // Avoid deleting an existing applist if we couldn't get one
-    if (!appList.isEmpty()) {
+    if (!appList.isEmpty() && serializeApps) {
         settings.remove(SER_APPLIST);
         settings.beginWriteArray(SER_APPLIST);
         for (int i = 0; i < appList.count(); i++) {
@@ -103,6 +103,21 @@ void NvComputer::serialize(QSettings& settings) const
         }
         settings.endArray();
     }
+}
+
+bool NvComputer::isEqualSerialized(const NvComputer &that) const
+{
+    return this->name == that.name &&
+           this->hasCustomName == that.hasCustomName &&
+           this->uuid == that.uuid &&
+           this->macAddress == that.macAddress &&
+           this->localAddress == that.localAddress &&
+           this->remoteAddress == that.remoteAddress &&
+           this->ipv6Address == that.ipv6Address &&
+           this->manualAddress == that.manualAddress &&
+           this->serverCert == that.serverCert &&
+           this->isNvidiaServerSoftware == that.isNvidiaServerSoftware &&
+           this->appList == that.appList;
 }
 
 void NvComputer::sortAppList()
@@ -136,7 +151,8 @@ NvComputer::NvComputer(NvHTTP& http, QString serverInfo)
         this->serverCodecModeSupport = codecSupport.toInt();
     }
     else {
-        this->serverCodecModeSupport = 0;
+        // Assume H.264 is always supported
+        this->serverCodecModeSupport = SCM_H264;
     }
 
     QString maxLumaPixelsHEVC = NvHTTP::getXmlString(serverInfo, "MaxLumaPixelsHEVC");
@@ -150,8 +166,8 @@ NvComputer::NvComputer(NvHTTP& http, QString serverInfo)
     this->displayModes = NvHTTP::getDisplayModeList(serverInfo);
     std::stable_sort(this->displayModes.begin(), this->displayModes.end(),
                      [](const NvDisplayMode& mode1, const NvDisplayMode& mode2) {
-        return mode1.width * mode1.height * mode1.refreshRate <
-                mode2.width * mode2.height * mode2.refreshRate;
+        return (uint64_t)mode1.width * mode1.height * mode1.refreshRate <
+                (uint64_t)mode2.width * mode2.height * mode2.refreshRate;
     });
 
     // We can get an IPv4 loopback address if we're using the GS IPv6 Forwarder
@@ -169,7 +185,7 @@ NvComputer::NvComputer(NvHTTP& http, QString serverInfo)
     // to support dynamic HTTP WAN ports without requiring the user to manually enter the port.
     QString remotePortStr = NvHTTP::getXmlString(serverInfo, "ExternalPort");
     if (remotePortStr.isEmpty() || (this->externalPort = remotePortStr.toUShort()) == 0) {
-        this->externalPort = DEFAULT_HTTP_PORT;
+        this->externalPort = http.httpPort();
     }
 
     QString remoteAddress = NvHTTP::getXmlString(serverInfo, "ExternalIP");
@@ -219,23 +235,30 @@ bool NvComputer::wake() const
         for (int i = 0; i < 16; i++) {
             wolPayload.append(macAddress);
         }
-        Q_ASSERT(wolPayload.count() == 102);
+        Q_ASSERT(wolPayload.size() == 102);
     }
 
-    const quint16 WOL_PORTS[] = {
+    // Ports used as-is
+    const quint16 STATIC_WOL_PORTS[] = {
         9, // Standard WOL port (privileged port)
-        47998, 47999, 48000, 48002, 48010, // Ports opened by GFE
         47009, // Port opened by Moonlight Internet Hosting Tool for WoL (non-privileged port)
+    };
+
+    // Ports offset by the HTTP base port for hosts using alternate ports
+    const quint16 DYNAMIC_WOL_PORTS[] = {
+        47998, 47999, 48000, 48002, 48010, // Ports opened by GFE
     };
 
     // Add the addresses that we know this host to be
     // and broadcast addresses for this link just in
     // case the host has timed out in ARP entries.
-    QVector<QString> addressList;
+    QMap<QString, quint16> addressMap;
+    QSet<quint16> basePortSet;
     for (const NvAddress& addr : uniqueAddresses()) {
-        addressList.append(addr.address());
+        addressMap.insert(addr.address(), addr.port());
+        basePortSet.insert(addr.port());
     }
-    addressList.append("255.255.255.255");
+    addressMap.insert("255.255.255.255", 0);
 
     // Try to broadcast on all available NICs
     for (const QNetworkInterface& nic : QNetworkInterface::allInterfaces()) {
@@ -254,37 +277,73 @@ bool NvComputer::wake() const
 
             // Skip IPv6 which doesn't support broadcast
             if (!addr.broadcast().isNull()) {
-                addressList.append(addr.broadcast().toString());
+                addressMap.insert(addr.broadcast().toString(), 0);
             }
         }
 
         if (!allNodesMulticast.scopeId().isEmpty()) {
-            addressList.append(allNodesMulticast.toString());
+            addressMap.insert(allNodesMulticast.toString(), 0);
         }
     }
 
     // Try all unique address strings or host names
     bool success = false;
-    for (QString& addressString : addressList) {
-        QHostInfo hostInfo = QHostInfo::fromName(addressString);
+    for (auto i = addressMap.constBegin(); i != addressMap.constEnd(); i++) {
+        QHostAddress literalAddress;
+        QList<QHostAddress> addressList;
 
-        if (hostInfo.error() != QHostInfo::NoError) {
-            qWarning() << "Error resolving" << addressString << ":" << hostInfo.errorString();
-            continue;
+        // If this is an IPv4/IPv6 literal, don't use QHostInfo::fromName() because that will
+        // try to perform a reverse DNS lookup that leads to delays sending WoL packets.
+        if (literalAddress.setAddress(i.key())) {
+            addressList.append(literalAddress);
+        }
+        else {
+            QHostInfo hostInfo = QHostInfo::fromName(i.key());
+            if (hostInfo.error() != QHostInfo::NoError) {
+                qWarning() << "Error resolving" << i.key() << ":" << hostInfo.errorString();
+                continue;
+            }
+
+            addressList.append(hostInfo.addresses());
         }
 
         // Try all IP addresses that this string resolves to
-        for (QHostAddress& address : hostInfo.addresses()) {
+        for (QHostAddress& address : addressList) {
             QUdpSocket sock;
 
-            // Send to all ports
-            for (quint16 port : WOL_PORTS) {
+            // Send to all static ports
+            for (quint16 port : STATIC_WOL_PORTS) {
                 if (sock.writeDatagram(wolPayload, address, port)) {
                     qInfo().nospace().noquote() << "Sent WoL packet to " << name << " via " << address.toString() << ":" << port;
                     success = true;
                 }
                 else {
                     qWarning() << "Send failed:" << sock.error();
+                }
+            }
+
+            QList<quint16> basePorts;
+            if (i.value() != 0) {
+                // If we have a known base port for this address, use only that port
+                basePorts.append(i.value());
+            }
+            else {
+                // If this is a broadcast address without a known HTTP port, try all of them
+                basePorts.append(basePortSet.values());
+            }
+
+            // Send to all dynamic ports using the HTTP port offset(s) for this address
+            for (quint16 basePort : basePorts) {
+                for (quint16 port : DYNAMIC_WOL_PORTS) {
+                    port = (port - 47989) + basePort;
+
+                    if (sock.writeDatagram(wolPayload, address, port)) {
+                        qInfo().nospace().noquote() << "Sent WoL packet to " << name << " via " << address.toString() << ":" << port;
+                        success = true;
+                    }
+                    else {
+                        qWarning() << "Send failed:" << sock.error();
+                    }
                 }
             }
         }

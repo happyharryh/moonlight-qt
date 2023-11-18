@@ -26,6 +26,7 @@ Item {
     function onLaunchFailed(message) {
         errorDialog.text = message
         errorDialog.open()
+        console.error(message)
     }
 
     function onAppQuitRequired(appName) {
@@ -84,10 +85,8 @@ Item {
 
         function quitApp() {
             var component = Qt.createComponent("QuitSegue.qml")
-            var params = {"appName": appName}
+            var params = {"appName": appName, "quitRunningAppFn": launcher.quitRunningApp}
             stackView.push(component.createObject(stackView, params))
-            // Trigger the quit after pushing the quit segue on screen
-            launcher.quitRunningApp()
         }
 
         onAccepted: quitApp()

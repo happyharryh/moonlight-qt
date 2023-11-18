@@ -5,6 +5,7 @@
 #include <QTranslator>
 #include <QCoreApplication>
 #include <QLocale>
+#include <QtMath>
 
 #include <QtDebug>
 
@@ -20,9 +21,9 @@
 #define SER_MULTICONT "multicontroller"
 #define SER_AUDIOCFG "audiocfg"
 #define SER_VIDEOCFG "videocfg"
+#define SER_HDR "hdr"
 #define SER_VIDEODEC "videodec"
 #define SER_WINDOWMODE "windowmode"
-#define SER_UNSUPPORTEDFPS "unsupportedfps"
 #define SER_MDNS "mdns"
 #define SER_QUITAPPAFTER "quitAppAfter"
 #define SER_ABSMOUSEMODE "mouseacceleration"
@@ -91,7 +92,6 @@ void StreamingPreferences::reload()
     gameOptimizations = settings.value(SER_GAMEOPTS, true).toBool();
     playAudioOnHost = settings.value(SER_HOSTAUDIO, false).toBool();
     multiController = settings.value(SER_MULTICONT, true).toBool();
-    unsupportedFps = settings.value(SER_UNSUPPORTEDFPS, false).toBool();
     enableMdns = settings.value(SER_MDNS, true).toBool();
     quitAppAfter = settings.value(SER_QUITAPPAFTER, false).toBool();
     absoluteMouseMode = settings.value(SER_ABSMOUSEMODE, false).toBool();
@@ -108,6 +108,7 @@ void StreamingPreferences::reload()
     reverseScrollDirection = settings.value(SER_REVERSESCROLL, false).toBool();
     swapFaceButtons = settings.value(SER_SWAPFACEBUTTONS, false).toBool();
     keepAwake = settings.value(SER_KEEPAWAKE, true).toBool();
+    enableHdr = settings.value(SER_HDR, false).toBool();
     captureSysKeysMode = static_cast<CaptureSysKeysMode>(settings.value(SER_CAPTURESYSKEYS,
                                                          static_cast<int>(CaptureSysKeysMode::CSK_OFF)).toInt());
     audioConfig = static_cast<AudioConfig>(settings.value(SER_AUDIOCFG,
@@ -144,6 +145,12 @@ void StreamingPreferences::reload()
         if (windowMode == WindowMode::WM_FULLSCREEN && WMUtils::isRunningWayland()) {
             windowMode = WindowMode::WM_FULLSCREEN_DESKTOP;
         }
+    }
+
+    // Fixup VCC value to the new settings format with codec and HDR separate
+    if (videoCodecConfig == VCC_FORCE_HEVC_HDR_DEPRECATED) {
+        videoCodecConfig = VCC_AUTO;
+        enableHdr = true;
     }
 }
 
@@ -235,8 +242,8 @@ QString StreamingPreferences::getSuffixFromLanguage(StreamingPreferences::Langua
         return "tr";
     case LANG_UK:
         return "uk";
-    case LANG_ZH_HANT:
-        return "zh_Hant";
+    case LANG_ZH_TW:
+        return "zh_TW";
     case LANG_PT:
         return "pt";
     case LANG_PT_BR:
@@ -251,6 +258,8 @@ QString StreamingPreferences::getSuffixFromLanguage(StreamingPreferences::Langua
         return "pl";
     case LANG_CS:
         return "cs";
+    case LANG_HE:
+        return "he";
     case LANG_AUTO:
     default:
         return QLocale::system().name();
@@ -269,7 +278,6 @@ void StreamingPreferences::save()
     settings.setValue(SER_GAMEOPTS, gameOptimizations);
     settings.setValue(SER_HOSTAUDIO, playAudioOnHost);
     settings.setValue(SER_MULTICONT, multiController);
-    settings.setValue(SER_UNSUPPORTEDFPS, unsupportedFps);
     settings.setValue(SER_MDNS, enableMdns);
     settings.setValue(SER_QUITAPPAFTER, quitAppAfter);
     settings.setValue(SER_ABSMOUSEMODE, absoluteMouseMode);
@@ -281,6 +289,7 @@ void StreamingPreferences::save()
     settings.setValue(SER_PACKETSIZE, packetSize);
     settings.setValue(SER_DETECTNETBLOCKING, detectNetworkBlocking);
     settings.setValue(SER_AUDIOCFG, static_cast<int>(audioConfig));
+    settings.setValue(SER_HDR, enableHdr);
     settings.setValue(SER_VIDEOCFG, static_cast<int>(videoCodecConfig));
     settings.setValue(SER_VIDEODEC, static_cast<int>(videoDecoderSelection));
     settings.setValue(SER_WINDOWMODE, static_cast<int>(windowMode));
@@ -302,28 +311,51 @@ void StreamingPreferences::save()
 
 int StreamingPreferences::getDefaultBitrate(int width, int height, int fps)
 {
-    // This table prefers 16:10 resolutions because they are
-    // only slightly more pixels than the 16:9 equivalents, so
-    // we don't want to bump those 16:10 resolutions up to the
-    // next 16:9 slot.
+    // Don't scale bitrate linearly beyond 60 FPS. It's definitely not a linear
+    // bitrate increase for frame rate once we get to values that high.
+    float frameRateFactor = (fps <= 60 ? fps : (qSqrt(fps / 60.f) * 60.f)) / 30.f;
 
-    if (width * height <= 640 * 360) {
-        return static_cast<int>(1000 * (fps / 30.0));
+    // TODO: Collect some empirical data to see if these defaults make sense.
+    // We're just using the values that the Shield used, as we have for years.
+    static const struct resTable {
+        int pixels;
+        int factor;
+    } resTable[] {
+        { 640 * 360, 1 },
+        { 854 * 480, 2 },
+        { 1280 * 720, 5 },
+        { 1920 * 1080, 10 },
+        { 2560 * 1440, 20 },
+        { 3840 * 2160, 40 },
+        { -1, -1 },
+    };
+
+    // Calculate the resolution factor by linear interpolation of the resolution table
+    float resolutionFactor;
+    int pixels = width * height;
+    for (int i = 0;; i++) {
+        if (pixels == resTable[i].pixels) {
+            // We can bail immediately for exact matches
+            resolutionFactor = resTable[i].factor;
+            break;
+        }
+        else if (pixels < resTable[i].pixels) {
+            if (i == 0) {
+                // Never go below the lowest resolution entry
+                resolutionFactor = resTable[i].factor;
+            }
+            else {
+                // Interpolate between the entry greater than the chosen resolution (i) and the entry less than the chosen resolution (i-1)
+                resolutionFactor = ((float)(pixels - resTable[i-1].pixels) / (resTable[i].pixels - resTable[i-1].pixels)) * (resTable[i].factor - resTable[i-1].factor) + resTable[i-1].factor;
+            }
+            break;
+        }
+        else if (resTable[i].pixels == -1) {
+            // Never go above the highest resolution entry
+            resolutionFactor = resTable[i-1].factor;
+            break;
+        }
     }
-    else if (width * height <= 854 * 480) {
-        return static_cast<int>(1500 * (fps / 30.0));
-    }
-    // This covers 1280x720 and 1280x800 too
-    else if (width * height <= 1366 * 768) {
-        return static_cast<int>(5000 * (fps / 30.0));
-    }
-    else if (width * height <= 1920 * 1200) {
-        return static_cast<int>(10000 * (fps / 30.0));
-    }
-    else if (width * height <= 2560 * 1600) {
-        return static_cast<int>(20000 * (fps / 30.0));
-    }
-    else /* if (width * height <= 3840 * 2160) */ {
-        return static_cast<int>(40000 * (fps / 30.0));
-    }
+
+    return qRound(resolutionFactor * frameRateFactor) * 1000;
 }

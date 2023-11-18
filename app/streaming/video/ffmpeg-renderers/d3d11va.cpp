@@ -141,6 +141,12 @@ D3D11VARenderer::~D3D11VARenderer()
         av_buffer_unref(&m_HwFramesContext);
     }
 
+    // Force destruction of the swapchain immediately
+    if (m_DeviceContext != nullptr) {
+        m_DeviceContext->ClearState();
+        m_DeviceContext->Flush();
+    }
+
     if (m_HwDeviceContext != nullptr) {
         // This will release m_Device and m_DeviceContext too
         av_buffer_unref(&m_HwDeviceContext);
@@ -361,6 +367,15 @@ bool D3D11VARenderer::initialize(PDECODER_PARAMETERS params)
                          hr);
             // Non-fatal
         }
+
+        // DXVA2 may let us take over for FSE V-sync off cases. However, if we don't have DXGI_FEATURE_PRESENT_ALLOW_TEARING
+        // then we should not attempt to do this unless there's no other option (HDR, DXVA2 failed in pass 1, etc).
+        if (!m_AllowTearing && m_DecoderSelectionPass == 0 && !(params->videoFormat & VIDEO_FORMAT_MASK_10BIT) &&
+                (SDL_GetWindowFlags(params->window) & SDL_WINDOW_FULLSCREEN_DESKTOP) == SDL_WINDOW_FULLSCREEN) {
+            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                        "Defaulting to DXVA2 for FSE without DXGI_FEATURE_PRESENT_ALLOW_TEARING support");
+            return false;
+        }
     }
 
     SDL_SysWMinfo info;
@@ -406,8 +421,9 @@ bool D3D11VARenderer::initialize(PDECODER_PARAMETERS params)
         return false;
     }
 
-    // Surfaces must be 128 pixel aligned for HEVC and 16 pixel aligned for H.264
-    m_TextureAlignment = (params->videoFormat & VIDEO_FORMAT_MASK_H265) ? 128 : 16;
+    // Surfaces must be 16 pixel aligned for H.264 and 128 pixel aligned for everything else
+    // https://github.com/FFmpeg/FFmpeg/blob/a234e5cd80224c95a205c1f3e297d8c04a1374c3/libavcodec/dxva2.c#L609-L616
+    m_TextureAlignment = (params->videoFormat & VIDEO_FORMAT_MASK_H264) ? 16 : 128;
 
     if (!setupRenderingResources()) {
         return false;
@@ -512,19 +528,25 @@ void D3D11VARenderer::setHdrMode(bool enabled)
 
     if (enabled) {
         DXGI_HDR_METADATA_HDR10 hdr10Metadata;
+        SS_HDR_METADATA sunshineHdrMetadata;
 
-        hdr10Metadata.RedPrimary[0] = m_DecoderParams.hdrMetadata.displayPrimaries[0].x;
-        hdr10Metadata.RedPrimary[1] = m_DecoderParams.hdrMetadata.displayPrimaries[0].y;
-        hdr10Metadata.GreenPrimary[0] = m_DecoderParams.hdrMetadata.displayPrimaries[1].x;
-        hdr10Metadata.GreenPrimary[1] = m_DecoderParams.hdrMetadata.displayPrimaries[1].y;
-        hdr10Metadata.BluePrimary[0] = m_DecoderParams.hdrMetadata.displayPrimaries[2].x;
-        hdr10Metadata.BluePrimary[1] = m_DecoderParams.hdrMetadata.displayPrimaries[2].y;
-        hdr10Metadata.WhitePoint[0] = m_DecoderParams.hdrMetadata.whitePoint.x;
-        hdr10Metadata.WhitePoint[1] = m_DecoderParams.hdrMetadata.whitePoint.y;
-        hdr10Metadata.MaxMasteringLuminance = m_DecoderParams.hdrMetadata.maxDisplayMasteringLuminance;
-        hdr10Metadata.MinMasteringLuminance = m_DecoderParams.hdrMetadata.minDisplayMasteringLuminance;
-        hdr10Metadata.MaxContentLightLevel = m_DecoderParams.hdrMetadata.maxContentLightLevel;
-        hdr10Metadata.MaxFrameAverageLightLevel = m_DecoderParams.hdrMetadata.maxFrameAverageLightLevel;
+        // Sunshine will have HDR metadata but GFE will not
+        if (!LiGetHdrMetadata(&sunshineHdrMetadata)) {
+            RtlZeroMemory(&sunshineHdrMetadata, sizeof(sunshineHdrMetadata));
+        }
+
+        hdr10Metadata.RedPrimary[0] = sunshineHdrMetadata.displayPrimaries[0].x;
+        hdr10Metadata.RedPrimary[1] = sunshineHdrMetadata.displayPrimaries[0].y;
+        hdr10Metadata.GreenPrimary[0] = sunshineHdrMetadata.displayPrimaries[1].x;
+        hdr10Metadata.GreenPrimary[1] = sunshineHdrMetadata.displayPrimaries[1].y;
+        hdr10Metadata.BluePrimary[0] = sunshineHdrMetadata.displayPrimaries[2].x;
+        hdr10Metadata.BluePrimary[1] = sunshineHdrMetadata.displayPrimaries[2].y;
+        hdr10Metadata.WhitePoint[0] = sunshineHdrMetadata.whitePoint.x;
+        hdr10Metadata.WhitePoint[1] = sunshineHdrMetadata.whitePoint.y;
+        hdr10Metadata.MaxMasteringLuminance = sunshineHdrMetadata.maxDisplayLuminance;
+        hdr10Metadata.MinMasteringLuminance = sunshineHdrMetadata.minDisplayLuminance;
+        hdr10Metadata.MaxContentLightLevel = sunshineHdrMetadata.maxContentLightLevel;
+        hdr10Metadata.MaxFrameAverageLightLevel = sunshineHdrMetadata.maxFrameAverageLightLevel;
 
         hr = m_SwapChain->SetHDRMetaData(DXGI_HDR_METADATA_TYPE_HDR10, sizeof(hdr10Metadata), &hdr10Metadata);
         if (SUCCEEDED(hr)) {
@@ -982,6 +1004,36 @@ bool D3D11VARenderer::checkDecoderSupport(IDXGIAdapter* adapter)
         }
         break;
 
+    case VIDEO_FORMAT_AV1_MAIN8:
+        if (FAILED(videoDevice->CheckVideoDecoderFormat(&D3D11_DECODER_PROFILE_AV1_VLD_PROFILE0, DXGI_FORMAT_NV12, &supported))) {
+            SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                         "GPU doesn't support AV1 decoding");
+            videoDevice->Release();
+            return false;
+        }
+        else if (!supported) {
+            SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                         "GPU doesn't support AV1 decoding to NV12 format");
+            videoDevice->Release();
+            return false;
+        }
+        break;
+
+    case VIDEO_FORMAT_AV1_MAIN10:
+        if (FAILED(videoDevice->CheckVideoDecoderFormat(&D3D11_DECODER_PROFILE_AV1_VLD_PROFILE0, DXGI_FORMAT_P010, &supported))) {
+            SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                         "GPU doesn't support AV1 Main10 decoding");
+            videoDevice->Release();
+            return false;
+        }
+        else if (!supported) {
+            SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                         "GPU doesn't support AV1 Main10 decoding to P010 format");
+            videoDevice->Release();
+            return false;
+        }
+        break;
+
     default:
         SDL_assert(false);
         videoDevice->Release();
@@ -1029,7 +1081,8 @@ int D3D11VARenderer::getRendererAttributes()
 
 int D3D11VARenderer::getDecoderCapabilities()
 {
-    return CAPABILITY_REFERENCE_FRAME_INVALIDATION_HEVC;
+    return CAPABILITY_REFERENCE_FRAME_INVALIDATION_HEVC |
+           CAPABILITY_REFERENCE_FRAME_INVALIDATION_AV1;
 }
 
 bool D3D11VARenderer::needsTestFrame()

@@ -5,12 +5,14 @@
 
 #include <SDL.h>
 
+#include "settings/streamingpreferences.h"
+
 class SdlGamepadKeyNavigation : public QObject
 {
     Q_OBJECT
 
 public:
-    SdlGamepadKeyNavigation();
+    SdlGamepadKeyNavigation(StreamingPreferences* prefs);
 
     ~SdlGamepadKeyNavigation();
 
@@ -29,6 +31,7 @@ private slots:
     void onPollingTimerFired();
 
 private:
+    StreamingPreferences* m_Prefs;
     QTimer* m_PollingTimer;
     QList<SDL_GameController*> m_Gamepads;
     bool m_Enabled;

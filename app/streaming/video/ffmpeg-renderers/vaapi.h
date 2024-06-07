@@ -66,6 +66,7 @@ public:
     virtual int getDecoderColorspace() override;
     virtual int getDecoderCapabilities() override;
     virtual void notifyOverlayUpdated(Overlay::OverlayType) override;
+    virtual bool notifyWindowChanged(PWINDOW_STATE_CHANGE_INFO) override;
 
 #ifdef HAVE_EGL
     virtual bool canExportEGL() override;
@@ -111,11 +112,8 @@ private:
     int m_DrmFd;
 #endif
 
-    int m_VideoWidth;
-    int m_VideoHeight;
+    SDL_Window* m_Window;
     int m_VideoFormat;
-    int m_DisplayWidth;
-    int m_DisplayHeight;
 
 #ifdef HAVE_EGL
     enum class EglExportType {

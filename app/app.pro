@@ -120,6 +120,13 @@ unix:!macx {
                     CONFIG += cuda
                 }
             }
+
+            !disable-libplacebo {
+                packagesExist(libplacebo) {
+                    PKGCONFIG += libplacebo
+                    CONFIG += libplacebo
+                }
+            }
         }
 
         !disable-wayland {
@@ -145,8 +152,8 @@ win32:!winrt {
     CONFIG += soundio discord-rpc
 }
 macx {
-    LIBS += -lssl -lcrypto -lavcodec.60 -lavutil.58 -lopus -framework SDL2 -framework SDL2_ttf
-    LIBS += -lobjc -framework VideoToolbox -framework AVFoundation -framework CoreVideo -framework CoreGraphics -framework CoreMedia -framework AppKit -framework Metal
+    LIBS += -lssl -lcrypto -lavcodec.61 -lavutil.59 -lopus -framework SDL2 -framework SDL2_ttf
+    LIBS += -lobjc -framework VideoToolbox -framework AVFoundation -framework CoreVideo -framework CoreGraphics -framework CoreMedia -framework AppKit -framework Metal -framework QuartzCore
 
     # For libsoundio
     LIBS += -framework CoreAudio -framework AudioUnit
@@ -295,7 +302,7 @@ mmal {
     # significantly better performance than EGL on the Pi. Setting
     # this option allows EGL usage even if built with MMAL support.
     #
-    # It is highly recommended to also build with 'glslow' to avoid
+    # It is highly recommended to also build with 'gpuslow' to avoid
     # EGL being preferred if direct DRM rendering is available.
     allow-egl-with-mmal {
         message(Allowing EGL usage with MMAL enabled)
@@ -325,6 +332,16 @@ cuda {
 
     # ffnvcodec uses libdl in cuda_load_functions()/cuda_free_functions()
     LIBS += -ldl
+}
+libplacebo {
+    message(Vulkan support enabled via libplacebo)
+
+    DEFINES += HAVE_LIBPLACEBO_VULKAN
+    SOURCES += \
+        streaming/video/ffmpeg-renderers/plvk.cpp \
+        streaming/video/ffmpeg-renderers/plvk_c.c
+    HEADERS += \
+        streaming/video/ffmpeg-renderers/plvk.h
 }
 config_EGL {
     message(EGL renderer selected)
@@ -372,7 +389,8 @@ macx {
     message(VideoToolbox renderer selected)
 
     SOURCES += \
-        streaming/video/ffmpeg-renderers/vt.mm
+        streaming/video/ffmpeg-renderers/vt_avsamplelayer.mm \
+        streaming/video/ffmpeg-renderers/vt_metal.mm
 
     HEADERS += \
         streaming/video/ffmpeg-renderers/vt.h
@@ -399,6 +417,16 @@ glslow {
     message(GL slow build)
 
     DEFINES += GL_IS_SLOW
+}
+vkslow {
+    message(Vulkan slow build)
+
+    DEFINES += VULKAN_IS_SLOW
+}
+gpuslow {
+    message(GPU slow build)
+
+    DEFINES += GL_IS_SLOW VULKAN_IS_SLOW
 }
 wayland {
     message(Wayland extensions enabled)
@@ -436,7 +464,8 @@ TRANSLATIONS += \
     languages/qml_pt_BR.ts \
     languages/qml_pl.ts \
     languages/qml_cs.ts \
-    languages/qml_he.ts
+    languages/qml_he.ts \
+    languages/qml_ckb.ts
 
 # Additional import path used to resolve QML modules in Qt Creator's code model
 QML_IMPORT_PATH =

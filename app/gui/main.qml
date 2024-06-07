@@ -19,26 +19,48 @@ ApplicationWindow {
     property bool clearOnBack: false
 
     id: window
-    visible: true
     width: 1280
     height: 600
 
-    // Override the background color to Material 2 colors for Qt 6.5+
-    // in order to improve contrast between GFE's placeholder box art
-    // and the background of the app grid.
     Component.onCompleted: {
+        // Override the background color to Material 2 colors for Qt 6.5+
+        // in order to improve contrast between GFE's placeholder box art
+        // and the background of the app grid.
         if (SystemProperties.usesMaterial3Theme) {
             Material.background = "#303030"
         }
-    }
 
-    visibility: {
+        // Show the window according to the user's preferences
         if (SystemProperties.hasDesktopEnvironment) {
-            if (StreamingPreferences.uiDisplayMode == StreamingPreferences.UI_WINDOWED) return "Windowed"
-            else if (StreamingPreferences.uiDisplayMode == StreamingPreferences.UI_MAXIMIZED) return "Maximized"
-            else if (StreamingPreferences.uiDisplayMode == StreamingPreferences.UI_FULLSCREEN) return "FullScreen"
+            if (StreamingPreferences.uiDisplayMode == StreamingPreferences.UI_MAXIMIZED) {
+                window.showMaximized()
+            }
+            else if (StreamingPreferences.uiDisplayMode == StreamingPreferences.UI_FULLSCREEN) {
+                window.showFullScreen()
+            }
+            else {
+                window.show()
+            }
         } else {
-            return "FullScreen"
+            window.showFullScreen()
+        }
+
+        // Display any modal dialogs for configuration warnings
+        if (SystemProperties.isWow64) {
+            wow64Dialog.open()
+        }
+        else if (!SystemProperties.hasHardwareAcceleration) {
+            if (SystemProperties.isRunningXWayland) {
+                xWaylandDialog.open()
+            }
+            else {
+                noHwDecoderDialog.open()
+            }
+        }
+
+        if (SystemProperties.unmappedGamepads) {
+            unmappedGamepadDialog.unmappedGamepads = SystemProperties.unmappedGamepads
+            unmappedGamepadDialog.open()
         }
     }
   
@@ -156,41 +178,6 @@ ApplicationWindow {
         }
     }
 
-    property bool initialized: false
-
-    // BUG: Using onAfterSynchronizing: here causes very strange
-    // failures on Linux. Many shaders fail to compile and we
-    // eventually segfault deep inside the Qt OpenGL code.
-    onAfterRendering: {
-        // We use this callback to trigger dialog display because
-        // it only happens once the window is fully constructed.
-        // Doing it earlier can lead to the dialog appearing behind
-        // the window or otherwise without input focus.
-        if (!initialized) {
-            // Set initialized before calling anything else, because
-            // pumping the event loop can cause us to get another
-            // onAfterRendering call and potentially reenter this code.
-            initialized = true;
-
-            if (SystemProperties.isWow64) {
-                wow64Dialog.open()
-            }
-            else if (!SystemProperties.hasHardwareAcceleration) {
-                if (SystemProperties.isRunningXWayland) {
-                    xWaylandDialog.open()
-                }
-                else {
-                    noHwDecoderDialog.open()
-                }
-            }
-
-            if (SystemProperties.unmappedGamepads) {
-                unmappedGamepadDialog.unmappedGamepads = SystemProperties.unmappedGamepads
-                unmappedGamepadDialog.open()
-            }
-        }
-    }
-
     // Workaround for lack of instanceof in Qt 5.9.
     //
     // Based on https://stackoverflow.com/questions/13923794/how-to-do-a-is-a-typeof-or-instanceof-in-qml
@@ -283,7 +270,7 @@ ApplicationWindow {
                 visible: SystemProperties.hasBrowser &&
                          qmltypeof(stackView.currentItem, "SettingsView")
 
-                iconSource: "qrc:/res/Discord-Logo-White.svg"
+                iconSource: "qrc:/res/discord.svg"
 
                 ToolTip.delay: 1000
                 ToolTip.timeout: 3000

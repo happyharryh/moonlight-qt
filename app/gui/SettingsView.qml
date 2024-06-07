@@ -133,15 +133,45 @@ Flickable {
                     AutoResizingComboBox {
                         property int lastIndexValue
 
+                        function addDetectedResolution(friendlyNamePrefix, rect) {
+                            var indexToAdd = 0
+                            for (var j = 0; j < resolutionComboBox.count; j++) {
+                                var existing_width = parseInt(resolutionListModel.get(j).video_width);
+                                var existing_height = parseInt(resolutionListModel.get(j).video_height);
+
+                                if (rect.width === existing_width && rect.height === existing_height) {
+                                    // Duplicate entry, skip
+                                    indexToAdd = -1
+                                    break
+                                }
+                                else if (rect.width * rect.height > existing_width * existing_height) {
+                                    // Candidate entrypoint after this entry
+                                    indexToAdd = j + 1
+                                }
+                            }
+
+                            // Insert this display's resolution if it's not a duplicate
+                            if (indexToAdd >= 0) {
+                                resolutionListModel.insert(indexToAdd,
+                                                           {
+                                                               "text": friendlyNamePrefix+" ("+rect.width+"x"+rect.height+")",
+                                                               "video_width": ""+rect.width,
+                                                               "video_height": ""+rect.height,
+                                                               "is_custom": false
+                                                           })
+                            }
+                        }
+
                         // ignore setting the index at first, and actually set it when the component is loaded
                         Component.onCompleted: {
                             // Refresh display data before using it to build the list
                             SystemProperties.refreshDisplays()
 
-                            // Add native resolutions for all attached displays
+                            // Add native and safe area resolutions for all attached displays
                             var done = false
                             for (var displayIndex = 0; !done; displayIndex++) {
                                 var screenRect = SystemProperties.getNativeResolution(displayIndex);
+                                var safeAreaRect = SystemProperties.getSafeAreaResolution(displayIndex);
 
                                 if (screenRect.width === 0) {
                                     // Exceeded max count of displays
@@ -149,32 +179,8 @@ Flickable {
                                     break
                                 }
 
-                                var indexToAdd = 0
-                                for (var j = 0; j < resolutionComboBox.count; j++) {
-                                    var existing_width = parseInt(resolutionListModel.get(j).video_width);
-                                    var existing_height = parseInt(resolutionListModel.get(j).video_height);
-
-                                    if (screenRect.width === existing_width && screenRect.height === existing_height) {
-                                        // Duplicate entry, skip
-                                        indexToAdd = -1
-                                        break
-                                    }
-                                    else if (screenRect.width * screenRect.height > existing_width * existing_height) {
-                                        // Candidate entrypoint after this entry
-                                        indexToAdd = j + 1
-                                    }
-                                }
-
-                                // Insert this display's resolution if it's not a duplicate
-                                if (indexToAdd >= 0) {
-                                    resolutionListModel.insert(indexToAdd,
-                                                               {
-                                                                   "text": "Native ("+screenRect.width+"x"+screenRect.height+")",
-                                                                   "video_width": ""+screenRect.width,
-                                                                   "video_height": ""+screenRect.height,
-                                                                   "is_custom": false
-                                                               })
-                                }
+                                addDetectedResolution(qsTr("Native"), screenRect)
+                                addDetectedResolution(qsTr("Native (Excluding Notch)"), safeAreaRect)
                             }
 
                             // Prune resolutions that are over the decoder's maximum
@@ -210,7 +216,7 @@ Flickable {
                             if (!index_set) {
                                 // We did not find a match. This must be a custom resolution.
                                 resolutionListModel.append({
-                                                               "text": "Custom ("+StreamingPreferences.width+"x"+StreamingPreferences.height+")",
+                                                               "text": qsTr("Custom")+" ("+StreamingPreferences.width+"x"+StreamingPreferences.height+")",
                                                                "video_width": ""+StreamingPreferences.width,
                                                                "video_height": ""+StreamingPreferences.height,
                                                                "is_custom": true
@@ -219,7 +225,7 @@ Flickable {
                             }
                             else {
                                 resolutionListModel.append({
-                                                               "text": "Custom",
+                                                               "text": qsTr("Custom"),
                                                                "video_width": "",
                                                                "video_height": "",
                                                                "is_custom": true
@@ -689,7 +695,7 @@ Flickable {
 
                     Component.onCompleted: {
                         // Refresh the text after translations change
-                        languageChanged.connect(onValueChanged)
+                        languageChanged.connect(valueChanged)
                     }
                 }
 
@@ -1052,6 +1058,10 @@ Flickable {
                             text: "עִבְרִית" // Hebrew
                             val: StreamingPreferences.LANG_HE
                         } */
+                        /* ListElement {
+                            text: "کرمانجیی خواروو" // Central Kurdish
+                            val: StreamingPreferences.LANG_CKB
+                        } */
                     }
                     // ::onActivated must be used, as it only listens for when the index is changed by a human
                     onActivated : {
@@ -1349,15 +1359,7 @@ Flickable {
                     font.pointSize: 12
                     checked: StreamingPreferences.swapFaceButtons
                     onCheckedChanged: {
-                        // Check if the value changed (this is called on init too)
-                        if (StreamingPreferences.swapFaceButtons !== checked) {
-                            StreamingPreferences.swapFaceButtons = checked
-
-                            // Save and restart SdlGamepadKeyNavigation so it can pull the new value
-                            StreamingPreferences.save()
-                            SdlGamepadKeyNavigation.disable()
-                            SdlGamepadKeyNavigation.enable()
-                        }
+                        StreamingPreferences.swapFaceButtons = checked
                     }
 
                     ToolTip.delay: 1000
@@ -1691,10 +1693,6 @@ Flickable {
                         if (StreamingPreferences.enableMdns != checked) {
                             StreamingPreferences.enableMdns = checked
 
-                            // We must save the updated preference to ensure
-                            // ComputerManager can observe the change internally.
-                            StreamingPreferences.save()
-
                             // Restart polling so the mDNS change takes effect
                             if (window.pollingActive) {
                                 ComputerManager.stopPollingAsync()
@@ -1711,16 +1709,26 @@ Flickable {
                     font.pointSize: 12
                     checked: StreamingPreferences.detectNetworkBlocking
                     onCheckedChanged: {
-                        // This is called on init, so only do the work if we've
-                        // actually changed the value.
-                        if (StreamingPreferences.detectNetworkBlocking != checked) {
-                            StreamingPreferences.detectNetworkBlocking = checked
-
-                            // We must save the updated preference to ensure
-                            // ComputerManager can observe the change internally.
-                            StreamingPreferences.save()
-                        }
+                        StreamingPreferences.detectNetworkBlocking = checked
                     }
+                }
+
+                CheckBox {
+                    id: showPerformanceOverlay
+                    width: parent.width
+                    text: qsTr("Show performance stats while streaming")
+                    font.pointSize: 12
+                    checked: StreamingPreferences.showPerformanceOverlay
+                    onCheckedChanged: {
+                        StreamingPreferences.showPerformanceOverlay = checked
+                    }
+
+                    ToolTip.delay: 1000
+                    ToolTip.timeout: 5000
+                    ToolTip.visible: hovered
+                    ToolTip.text: qsTr("Display real-time stream performance information while streaming.") + "\n\n" +
+                                  qsTr("You can toggle it at any time while streaming using Ctrl+Alt+Shift+S or Select+L1+R1+X.") + "\n\n" +
+                                  qsTr("The performance overlay is not supported on Steam Link or Raspberry Pi.")
                 }
             }
         }

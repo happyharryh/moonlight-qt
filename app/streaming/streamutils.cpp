@@ -6,10 +6,67 @@
 #include <ApplicationServices/ApplicationServices.h>
 #endif
 
+#ifdef Q_OS_WINDOWS
+#include <Windows.h>
+#endif
+
+#ifdef Q_OS_LINUX
+#include <sys/auxv.h>
+
+#if defined(Q_PROCESSOR_ARM)
+
+#ifndef HWCAP2_AES
+#define HWCAP2_AES (1 << 0)
+#endif
+
+#elif defined(Q_PROCESSOR_RISCV)
+
+#if __has_include(<sys/hwprobe.h>)
+#include <sys/hwprobe.h>
+#else
+#include <unistd.h>
+
+#if __has_include(<asm/hwprobe.h>)
+#include <asm/hwprobe.h>
+#include <sys/syscall.h>
+#else
+#define __NR_riscv_hwprobe 258
+struct riscv_hwprobe {
+    int64_t key;
+    uint64_t value;
+};
+#define RISCV_HWPROBE_KEY_IMA_EXT_0 4
+#endif
+
+// RISC-V Scalar AES [E]ncryption and [D]ecryption
+#ifndef RISCV_HWPROBE_EXT_ZKND
+#define RISCV_HWPROBE_EXT_ZKND (1 << 11)
+#define RISCV_HWPROBE_EXT_ZKNE (1 << 12)
+#endif
+
+// RISC-V Vector AES
+#ifndef RISCV_HWPROBE_EXT_ZVKNED
+#define RISCV_HWPROBE_EXT_ZVKNED (1 << 21)
+#endif
+
+static int __riscv_hwprobe(struct riscv_hwprobe *pairs, size_t pair_count,
+                           size_t cpu_count, unsigned long *cpus,
+                           unsigned int flags)
+{
+    return syscall(__NR_riscv_hwprobe, pairs, pair_count, cpu_count, cpus, flags);
+}
+
+#endif
+#endif
+#endif
+
 Uint32 StreamUtils::getPlatformWindowFlags()
 {
-#ifdef Q_OS_DARWIN
+#if defined(Q_OS_DARWIN)
     return SDL_WINDOW_METAL;
+#elif defined(HAVE_LIBPLACEBO_VULKAN)
+    // We'll fall back to GL if Vulkan fails
+    return SDL_WINDOW_VULKAN;
 #else
     return 0;
 #endif
@@ -92,7 +149,51 @@ int StreamUtils::getDisplayRefreshRate(SDL_Window* window)
     return mode.refresh_rate;
 }
 
-bool StreamUtils::getNativeDesktopMode(int displayIndex, SDL_DisplayMode* mode)
+bool StreamUtils::hasFastAes()
+{
+#ifndef __has_builtin
+#define __has_builtin(x) 0
+#endif
+
+#if (__has_builtin(__builtin_cpu_supports) || (defined(__GNUC__) && __GNUC__ >= 6)) && defined(Q_PROCESSOR_X86)
+    return __builtin_cpu_supports("aes");
+#elif defined(__BUILTIN_CPU_SUPPORTS__) && defined(Q_PROCESSOR_POWER)
+    return __builtin_cpu_supports("vcrypto");
+#elif defined(Q_OS_WINDOWS) && defined(Q_PROCESSOR_ARM)
+    return IsProcessorFeaturePresent(PF_ARM_V8_CRYPTO_INSTRUCTIONS_AVAILABLE);
+#elif defined(_MSC_VER) && defined(Q_PROCESSOR_X86)
+    int regs[4];
+    __cpuid(regs, 1);
+    return regs[2] & (1 << 25); // AES-NI
+#elif defined(Q_OS_DARWIN)
+    // Everything that runs Catalina and later has AES-NI or ARMv8 crypto instructions
+    return true;
+#elif defined(Q_OS_LINUX) && defined(Q_PROCESSOR_ARM) && QT_POINTER_SIZE == 4
+    return getauxval(AT_HWCAP2) & HWCAP2_AES;
+#elif defined(Q_OS_LINUX) && defined(Q_PROCESSOR_ARM) && QT_POINTER_SIZE == 8
+    return getauxval(AT_HWCAP) & HWCAP_AES;
+#elif defined(Q_PROCESSOR_RISCV)
+    riscv_hwprobe pairs[1] = {
+        { RISCV_HWPROBE_KEY_IMA_EXT_0, 0 },
+    };
+
+    // If this syscall is not implemented, we'll get -ENOSYS
+    // and the value field will remain zero.
+    __riscv_hwprobe(pairs, SDL_arraysize(pairs), 0, nullptr, 0);
+
+    return (pairs[0].value & (RISCV_HWPROBE_EXT_ZKNE | RISCV_HWPROBE_EXT_ZKND)) ==
+               (RISCV_HWPROBE_EXT_ZKNE | RISCV_HWPROBE_EXT_ZKND) ||
+           (pairs[0].value & RISCV_HWPROBE_EXT_ZVKNED);
+#elif QT_POINTER_SIZE == 4
+    #warning Unknown 32-bit platform. Assuming AES is slow on this CPU.
+    return false;
+#else
+    #warning Unknown 64-bit platform. Assuming AES is fast on this CPU.
+    return true;
+#endif
+}
+
+bool StreamUtils::getNativeDesktopMode(int displayIndex, SDL_DisplayMode* mode, SDL_Rect* safeArea)
 {
 #ifdef Q_OS_DARWIN
 #define MAX_DISPLAYS 16
@@ -100,9 +201,6 @@ bool StreamUtils::getNativeDesktopMode(int displayIndex, SDL_DisplayMode* mode)
     uint32_t displayCount = 0;
     CGGetActiveDisplayList(MAX_DISPLAYS, displayIds, &displayCount);
     if (displayIndex >= displayCount) {
-        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
-                     "Too many displays: %d vs %d",
-                     displayIndex, displayCount);
         return false;
     }
 
@@ -122,20 +220,61 @@ bool StreamUtils::getNativeDesktopMode(int displayIndex, SDL_DisplayMode* mode)
             break;
         }
     }
+
+    safeArea->x = 0;
+    safeArea->y = 0;
+    safeArea->w = mode->w;
+    safeArea->h = mode->h;
+
+#if TARGET_CPU_ARM64
+    // Now that we found the native full-screen mode, let's look for one that matches along
+    // the width but not the height and we'll assume that's the safe area full-screen mode.
+    //
+    // There doesn't appear to be a CG API or flag that will tell us that a given mode
+    // is a "safe area" mode, so we have to use our own (brittle) heuristics. :(
+    //
+    // To avoid potential false positives, let's avoid checking for external displays, since
+    // we might have scenarios like a 1920x1200 display with an alternate 1920x1080 mode
+    // which would falsely trigger our notch detection here.
+    if (CGDisplayIsBuiltin(displayIds[displayIndex])) {
+        for (CFIndex i = 0; i < count; i++) {
+            auto cgMode = (CGDisplayModeRef)(CFArrayGetValueAtIndex(modeList, i));
+            auto cgModeWidth = static_cast<int>(CGDisplayModeGetWidth(cgMode));
+            auto cgModeHeight = static_cast<int>(CGDisplayModeGetHeight(cgMode));
+
+            // If the modes differ by more than 100, we'll assume it's not a notch mode
+            if (mode->w == cgModeWidth && mode->h != cgModeHeight && mode->h <= cgModeHeight + 100) {
+                safeArea->w = cgModeWidth;
+                safeArea->h = cgModeHeight;
+            }
+        }
+    }
+#endif
+
     CFRelease(modeList);
 
-    // Now find the SDL mode that matches the CG native mode
-    for (int i = 0; i < SDL_GetNumDisplayModes(displayIndex); i++) {
-        SDL_DisplayMode thisMode;
-        if (SDL_GetDisplayMode(displayIndex, i, &thisMode) == 0) {
-            if (thisMode.w == mode->w && thisMode.h == mode->h &&
+    // Special case for probing for notched displays prior to video subsystem initialization
+    // in Session::initialize() for Darwin only!
+    if (SDL_WasInit(SDL_INIT_VIDEO)) {
+        // Now find the SDL mode that matches the CG native mode
+        for (int i = 0; i < SDL_GetNumDisplayModes(displayIndex); i++) {
+            SDL_DisplayMode thisMode;
+            if (SDL_GetDisplayMode(displayIndex, i, &thisMode) == 0) {
+                if (thisMode.w == mode->w && thisMode.h == mode->h &&
                     thisMode.refresh_rate >= mode->refresh_rate) {
-                *mode = thisMode;
-                break;
+                    *mode = thisMode;
+                    break;
+                }
             }
         }
     }
 #else
+    SDL_assert(SDL_WasInit(SDL_INIT_VIDEO));
+
+    if (displayIndex >= SDL_GetNumVideoDisplays()) {
+        return false;
+    }
+
     // We need to get the true display resolution without DPI scaling (since we use High DPI).
     // Windows returns the real display resolution here, even if DPI scaling is enabled.
     // macOS and Wayland report a resolution that includes the DPI scaling factor. Picking
@@ -157,7 +296,13 @@ bool StreamUtils::getNativeDesktopMode(int displayIndex, SDL_DisplayMode* mode)
             return false;
         }
     }
+
+    safeArea->x = 0;
+    safeArea->y = 0;
+    safeArea->w = mode->w;
+    safeArea->h = mode->h;
 #endif
 
     return true;
 }
+

@@ -5,6 +5,7 @@
 #include <QTranslator>
 #include <QCoreApplication>
 #include <QLocale>
+#include <QReadWriteLock>
 #include <QtMath>
 
 #include <QtDebug>
@@ -37,6 +38,7 @@
 #define SER_DEFAULTVER "defaultver"
 #define SER_PACKETSIZE "packetsize"
 #define SER_DETECTNETBLOCKING "detectnetblocking"
+#define SER_SHOWPERFOVERLAY "showperfoverlay"
 #define SER_SWAPMOUSEBUTTONS "swapmousebuttons"
 #define SER_MUTEONFOCUSLOSS "muteonfocusloss"
 #define SER_BACKGROUNDGAMEPAD "backgroundgamepad"
@@ -52,18 +54,50 @@
 
 #define CURRENT_DEFAULT_VER 2
 
-StreamingPreferences::StreamingPreferences(QObject *parent)
-    : QObject(parent),
-      m_QmlEngine(nullptr)
+static StreamingPreferences* s_GlobalPrefs;
+static QReadWriteLock s_GlobalPrefsLock;
+
+StreamingPreferences::StreamingPreferences(QQmlEngine *qmlEngine)
+    : m_QmlEngine(qmlEngine)
 {
     reload();
 }
 
-StreamingPreferences::StreamingPreferences(QQmlEngine *qmlEngine, QObject *parent)
-    : QObject(parent),
-      m_QmlEngine(qmlEngine)
+StreamingPreferences* StreamingPreferences::get(QQmlEngine *qmlEngine)
 {
-    reload();
+    {
+        QReadLocker readGuard(&s_GlobalPrefsLock);
+
+        // If we have a preference object and it's associated with a QML engine or
+        // if the caller didn't specify a QML engine, return the existing object.
+        if (s_GlobalPrefs && (s_GlobalPrefs->m_QmlEngine || !qmlEngine)) {
+            // The lifetime logic here relies on the QML engine also being a singleton.
+            Q_ASSERT(!qmlEngine || s_GlobalPrefs->m_QmlEngine == qmlEngine);
+            return s_GlobalPrefs;
+        }
+    }
+
+    {
+        QWriteLocker writeGuard(&s_GlobalPrefsLock);
+
+        // If we already have an preference object but the QML engine is now available,
+        // associate the QML engine with the preferences.
+        if (s_GlobalPrefs) {
+            if (!s_GlobalPrefs->m_QmlEngine) {
+                s_GlobalPrefs->m_QmlEngine = qmlEngine;
+            }
+            else {
+                // We could reach this codepath if another thread raced with us
+                // and created the object while we were outside the pref lock.
+                Q_ASSERT(!qmlEngine || s_GlobalPrefs->m_QmlEngine == qmlEngine);
+            }
+        }
+        else {
+            s_GlobalPrefs = new StreamingPreferences(qmlEngine);
+        }
+
+        return s_GlobalPrefs;
+    }
 }
 
 void StreamingPreferences::reload()
@@ -101,6 +135,7 @@ void StreamingPreferences::reload()
     richPresence = settings.value(SER_RICHPRESENCE, true).toBool();
     gamepadMouse = settings.value(SER_GAMEPADMOUSE, true).toBool();
     detectNetworkBlocking = settings.value(SER_DETECTNETBLOCKING, true).toBool();
+    showPerformanceOverlay = settings.value(SER_SHOWPERFOVERLAY, false).toBool();
     packetSize = settings.value(SER_PACKETSIZE, 0).toInt();
     swapMouseButtons = settings.value(SER_SWAPMOUSEBUTTONS, false).toBool();
     muteOnFocusLoss = settings.value(SER_MUTEONFOCUSLOSS, false).toBool();
@@ -260,6 +295,8 @@ QString StreamingPreferences::getSuffixFromLanguage(StreamingPreferences::Langua
         return "cs";
     case LANG_HE:
         return "he";
+    case LANG_CKB:
+        return "ckb";
     case LANG_AUTO:
     default:
         return QLocale::system().name();
@@ -288,6 +325,7 @@ void StreamingPreferences::save()
     settings.setValue(SER_GAMEPADMOUSE, gamepadMouse);
     settings.setValue(SER_PACKETSIZE, packetSize);
     settings.setValue(SER_DETECTNETBLOCKING, detectNetworkBlocking);
+    settings.setValue(SER_SHOWPERFOVERLAY, showPerformanceOverlay);
     settings.setValue(SER_AUDIOCFG, static_cast<int>(audioConfig));
     settings.setValue(SER_HDR, enableHdr);
     settings.setValue(SER_VIDEOCFG, static_cast<int>(videoCodecConfig));

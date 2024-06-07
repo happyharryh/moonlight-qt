@@ -168,6 +168,12 @@ void EGLRenderer::notifyOverlayUpdated(Overlay::OverlayType type)
     }
 }
 
+bool EGLRenderer::notifyWindowChanged(PWINDOW_STATE_CHANGE_INFO info)
+{
+    // We can transparently handle size and display changes
+    return !(info->stateChangeFlags & ~(WINDOW_STATE_CHANGE_SIZE | WINDOW_STATE_CHANGE_DISPLAY));
+}
+
 bool EGLRenderer::isPixelFormatSupported(int videoFormat, AVPixelFormat pixelFormat)
 {
     // Pixel format support should be determined by the backend renderer
@@ -180,7 +186,7 @@ AVPixelFormat EGLRenderer::getPreferredPixelFormat(int videoFormat)
     return m_Backend->getPreferredPixelFormat(videoFormat);
 }
 
-void EGLRenderer::renderOverlay(Overlay::OverlayType type)
+void EGLRenderer::renderOverlay(Overlay::OverlayType type, int viewportWidth, int viewportHeight)
 {
     // Do nothing if this overlay is disabled
     if (!Session::get()->getOverlayManager().isOverlayEnabled(type)) {
@@ -234,7 +240,7 @@ void EGLRenderer::renderOverlay(Overlay::OverlayType type)
         else if (type == Overlay::OverlayDebug) {
             // Top left
             overlayRect.x = 0;
-            overlayRect.y = m_ViewportHeight - newSurface->h;
+            overlayRect.y = viewportHeight - newSurface->h;
         } else {
             SDL_assert(false);
         }
@@ -245,7 +251,7 @@ void EGLRenderer::renderOverlay(Overlay::OverlayType type)
         SDL_FreeSurface(newSurface);
 
         // Convert screen space to normalized device coordinates
-        StreamUtils::screenSpaceToNormalizedDeviceCoords(&overlayRect, m_ViewportWidth, m_ViewportHeight);
+        StreamUtils::screenSpaceToNormalizedDeviceCoords(&overlayRect, viewportWidth, viewportHeight);
 
         OVERLAY_VERTEX verts[] =
         {
@@ -452,13 +458,19 @@ bool EGLRenderer::initialize(PDECODER_PARAMETERS params)
         return false;
     }
 
+    // This renderer doesn't support HDR, so pick a different one.
+    // HACK: This avoids a deadlock in SDL_CreateRenderer() if
+    // Vulkan was used before and SDL is trying to load EGL.
+    if (params->videoFormat & VIDEO_FORMAT_MASK_10BIT) {
+        EGL_LOG(Info, "EGL doesn't support HDR rendering");
+        return false;
+    }
+
     // HACK: Work around bug where renderer will repeatedly fail with:
     // SDL_CreateRenderer() failed: Could not create GLES window surface
     // Don't retry if we've already failed to create a renderer for this
     // window *unless* the format has changed from 10-bit to 8-bit.
-    if (m_Window == s_LastFailedWindow &&
-            !!(params->videoFormat & VIDEO_FORMAT_MASK_10BIT) ==
-                !!(s_LastFailedVideoFormat & VIDEO_FORMAT_MASK_10BIT)) {
+    if (m_Window == s_LastFailedWindow) {
         EGL_LOG(Error, "SDL_CreateRenderer() already failed on this window!");
         return false;
     }
@@ -646,21 +658,6 @@ bool EGLRenderer::initialize(PDECODER_PARAMETERS params)
         m_eglDestroySync = nullptr;
         m_eglClientWaitSync = nullptr;
     }
-
-    /* Compute the video region size in order to keep the aspect ratio of the
-     * video stream.
-     */
-    SDL_Rect src, dst;
-    src.x = src.y = dst.x = dst.y = 0;
-    src.w = params->width;
-    src.h = params->height;
-    SDL_GL_GetDrawableSize(m_Window, &dst.w, &dst.h);
-    StreamUtils::scaleSourceToDestinationSurface(&src, &dst);
-
-    glViewport(dst.x, dst.y, dst.w, dst.h);
-
-    m_ViewportWidth = dst.w;
-    m_ViewportHeight = dst.h;
 
     // SDL always uses swap interval 0 under the hood on Wayland systems,
     // because the compositor guarantees tear-free rendering. In this
@@ -925,6 +922,20 @@ void EGLRenderer::renderFrame(AVFrame* frame)
     }
 
     glClear(GL_COLOR_BUFFER_BIT);
+
+    int drawableWidth, drawableHeight;
+    SDL_GL_GetDrawableSize(m_Window, &drawableWidth, &drawableHeight);
+
+    // Set the viewport to the size of the aspect-ratio-scaled video
+    SDL_Rect src, dst;
+    src.x = src.y = dst.x = dst.y = 0;
+    src.w = frame->width;
+    src.h = frame->height;
+    dst.w = drawableWidth;
+    dst.h = drawableHeight;
+    StreamUtils::scaleSourceToDestinationSurface(&src, &dst);
+    glViewport(dst.x, dst.y, dst.w, dst.h);
+
     glUseProgram(m_ShaderProgram);
     m_glBindVertexArrayOES(m_VAO);
 
@@ -943,8 +954,10 @@ void EGLRenderer::renderFrame(AVFrame* frame)
 
     m_glBindVertexArrayOES(0);
 
+    // Adjust the viewport to the whole window before rendering the overlays
+    glViewport(0, 0, drawableWidth, drawableHeight);
     for (int i = 0; i < Overlay::OverlayMax; i++) {
-        renderOverlay((Overlay::OverlayType)i);
+        renderOverlay((Overlay::OverlayType)i, drawableWidth, drawableHeight);
     }
 
     SDL_GL_SwapWindow(m_Window);

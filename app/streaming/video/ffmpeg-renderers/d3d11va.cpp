@@ -75,6 +75,8 @@ static_assert(sizeof(CSC_CONST_BUF) % 16 == 0, "Constant buffer sizes must be a 
 
 D3D11VARenderer::D3D11VARenderer(int decoderSelectionPass)
     : m_DecoderSelectionPass(decoderSelectionPass),
+      m_DevicesWithFL11Support(0),
+      m_DevicesWithCodecSupport(0),
       m_Factory(nullptr),
       m_Device(nullptr),
       m_SwapChain(nullptr),
@@ -82,6 +84,7 @@ D3D11VARenderer::D3D11VARenderer(int decoderSelectionPass)
       m_RenderTargetView(nullptr),
       m_LastColorSpace(-1),
       m_LastFullRange(false),
+      m_LastColorTrc(AVCOL_TRC_UNSPECIFIED),
       m_AllowTearing(false),
       m_VideoGenericPixelShader(nullptr),
       m_VideoBt601LimPixelShader(nullptr),
@@ -90,8 +93,7 @@ D3D11VARenderer::D3D11VARenderer(int decoderSelectionPass)
       m_VideoTexture(nullptr),
       m_OverlayLock(0),
       m_OverlayPixelShader(nullptr),
-      m_HwDeviceContext(nullptr),
-      m_HwFramesContext(nullptr)
+      m_HwDeviceContext(nullptr)
 {
     RtlZeroMemory(m_OverlayVertexBuffers, sizeof(m_OverlayVertexBuffers));
     RtlZeroMemory(m_OverlayTextures, sizeof(m_OverlayTextures));
@@ -137,10 +139,6 @@ D3D11VARenderer::~D3D11VARenderer()
     SAFE_COM_RELEASE(m_RenderTargetView);
     SAFE_COM_RELEASE(m_SwapChain);
 
-    if (m_HwFramesContext != nullptr) {
-        av_buffer_unref(&m_HwFramesContext);
-    }
-
     // Force destruction of the swapchain immediately
     if (m_DeviceContext != nullptr) {
         m_DeviceContext->ClearState();
@@ -164,6 +162,7 @@ bool D3D11VARenderer::createDeviceByAdapterIndex(int adapterIndex, bool* adapter
     bool success = false;
     IDXGIAdapter1* adapter = nullptr;
     DXGI_ADAPTER_DESC1 adapterDesc;
+    D3D_FEATURE_LEVEL featureLevel;
     HRESULT hr;
 
     SDL_assert(m_Device == nullptr);
@@ -213,13 +212,18 @@ bool D3D11VARenderer::createDeviceByAdapterIndex(int adapterIndex, bool* adapter
                            0,
                            D3D11_SDK_VERSION,
                            &m_Device,
-                           nullptr,
+                           &featureLevel,
                            &m_DeviceContext);
     if (FAILED(hr)) {
         SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
                      "D3D11CreateDevice() failed: %x",
                      hr);
         goto Exit;
+    }
+    else if (featureLevel >= D3D_FEATURE_LEVEL_11_0) {
+        // Remember that we found a non-software D3D11 devices with support for
+        // feature level 11.0 or later (Fermi, Terascale 2, or Ivy Bridge and later)
+        m_DevicesWithFL11Support++;
     }
 
     if (!checkDecoderSupport(adapter)) {
@@ -229,6 +233,10 @@ bool D3D11VARenderer::createDeviceByAdapterIndex(int adapterIndex, bool* adapter
         m_Device = nullptr;
 
         goto Exit;
+    }
+    else {
+        // Remember that we found a device with support for decoding this codec
+        m_DevicesWithCodecSupport++;
     }
 
     success = true;
@@ -421,10 +429,6 @@ bool D3D11VARenderer::initialize(PDECODER_PARAMETERS params)
         return false;
     }
 
-    // Surfaces must be 16 pixel aligned for H.264 and 128 pixel aligned for everything else
-    // https://github.com/FFmpeg/FFmpeg/blob/a234e5cd80224c95a205c1f3e297d8c04a1374c3/libavcodec/dxva2.c#L609-L616
-    m_TextureAlignment = (params->videoFormat & VIDEO_FORMAT_MASK_H264) ? 16 : 128;
-
     if (!setupRenderingResources()) {
         return false;
     }
@@ -458,43 +462,9 @@ bool D3D11VARenderer::initialize(PDECODER_PARAMETERS params)
         }
     }
 
-    {
-        m_HwFramesContext = av_hwframe_ctx_alloc(m_HwDeviceContext);
-        if (!m_HwFramesContext) {
-            SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
-                        "Failed to allocate D3D11VA frame context");
-            return false;
-        }
-
-        AVHWFramesContext* framesContext = (AVHWFramesContext*)m_HwFramesContext->data;
-
-        // We require NV12 or P010 textures for our shader
-        framesContext->format = AV_PIX_FMT_D3D11;
-        framesContext->sw_format = (params->videoFormat & VIDEO_FORMAT_MASK_10BIT) ?
-                    AV_PIX_FMT_P010 : AV_PIX_FMT_NV12;
-
-        framesContext->width = FFALIGN(params->width, m_TextureAlignment);
-        framesContext->height = FFALIGN(params->height, m_TextureAlignment);
-
-        // We can have up to 16 reference frames plus a working surface
-        framesContext->initial_pool_size = 17;
-
-        AVD3D11VAFramesContext* d3d11vaFramesContext = (AVD3D11VAFramesContext*)framesContext->hwctx;
-
-        d3d11vaFramesContext->BindFlags = D3D11_BIND_DECODER;
-
-        int err = av_hwframe_ctx_init(m_HwFramesContext);
-        if (err < 0) {
-            SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
-                         "Failed to initialize D3D11VA frame context: %d",
-                         err);
-            return false;
-        }
-
-        // Create our video texture and SRVs
-        if (!setupVideoTexture()) {
-            return false;
-        }
+    // Create our video texture and SRVs
+    if (!setupVideoTexture()) {
+        return false;
     }
 
     return true;
@@ -508,87 +478,6 @@ bool D3D11VARenderer::prepareDecoderContext(AVCodecContext* context, AVDictionar
                 "Using D3D11VA accelerated renderer");
 
     return true;
-}
-
-bool D3D11VARenderer::prepareDecoderContextInGetFormat(AVCodecContext *context, AVPixelFormat)
-{
-    // hw_frames_ctx must be initialized in ffGetFormat().
-    context->hw_frames_ctx = av_buffer_ref(m_HwFramesContext);
-
-    return true;
-}
-
-void D3D11VARenderer::setHdrMode(bool enabled)
-{
-    HRESULT hr;
-
-    // According to MSDN, we need to lock the context even if we're just using DXGI functions
-    // https://docs.microsoft.com/en-us/windows/win32/direct3d11/overviews-direct3d-11-render-multi-thread-intro
-    lockContext(this);
-
-    if (enabled) {
-        DXGI_HDR_METADATA_HDR10 hdr10Metadata;
-        SS_HDR_METADATA sunshineHdrMetadata;
-
-        // Sunshine will have HDR metadata but GFE will not
-        if (!LiGetHdrMetadata(&sunshineHdrMetadata)) {
-            RtlZeroMemory(&sunshineHdrMetadata, sizeof(sunshineHdrMetadata));
-        }
-
-        hdr10Metadata.RedPrimary[0] = sunshineHdrMetadata.displayPrimaries[0].x;
-        hdr10Metadata.RedPrimary[1] = sunshineHdrMetadata.displayPrimaries[0].y;
-        hdr10Metadata.GreenPrimary[0] = sunshineHdrMetadata.displayPrimaries[1].x;
-        hdr10Metadata.GreenPrimary[1] = sunshineHdrMetadata.displayPrimaries[1].y;
-        hdr10Metadata.BluePrimary[0] = sunshineHdrMetadata.displayPrimaries[2].x;
-        hdr10Metadata.BluePrimary[1] = sunshineHdrMetadata.displayPrimaries[2].y;
-        hdr10Metadata.WhitePoint[0] = sunshineHdrMetadata.whitePoint.x;
-        hdr10Metadata.WhitePoint[1] = sunshineHdrMetadata.whitePoint.y;
-        hdr10Metadata.MaxMasteringLuminance = sunshineHdrMetadata.maxDisplayLuminance;
-        hdr10Metadata.MinMasteringLuminance = sunshineHdrMetadata.minDisplayLuminance;
-        hdr10Metadata.MaxContentLightLevel = sunshineHdrMetadata.maxContentLightLevel;
-        hdr10Metadata.MaxFrameAverageLightLevel = sunshineHdrMetadata.maxFrameAverageLightLevel;
-
-        hr = m_SwapChain->SetHDRMetaData(DXGI_HDR_METADATA_TYPE_HDR10, sizeof(hdr10Metadata), &hdr10Metadata);
-        if (SUCCEEDED(hr)) {
-            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                        "Set display HDR mode: enabled");
-        }
-        else {
-            SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
-                         "Failed to enter HDR mode: %x",
-                         hr);
-        }
-
-        // Switch to Rec 2020 PQ (SMPTE ST 2084) colorspace for HDR10 rendering
-        hr = m_SwapChain->SetColorSpace1(DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020);
-        if (FAILED(hr)) {
-            SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
-                         "IDXGISwapChain::SetColorSpace1(DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020) failed: %x",
-                         hr);
-        }
-    }
-    else {
-        // Restore default sRGB colorspace
-        hr = m_SwapChain->SetColorSpace1(DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709);
-        if (FAILED(hr)) {
-            SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
-                         "IDXGISwapChain::SetColorSpace1(DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709) failed: %x",
-                         hr);
-        }
-
-        hr = m_SwapChain->SetHDRMetaData(DXGI_HDR_METADATA_TYPE_NONE, 0, nullptr);
-        if (SUCCEEDED(hr)) {
-            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                        "Set display HDR mode: disabled");
-        }
-        else {
-            SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
-                         "Failed to exit HDR mode: %x",
-                         hr);
-        }
-    }
-
-    unlockContext(this);
 }
 
 void D3D11VARenderer::renderFrame(AVFrame* frame)
@@ -629,8 +518,33 @@ void D3D11VARenderer::renderFrame(AVFrame* frame)
         flags = 0;
     }
 
+    HRESULT hr;
+
+    if (frame->color_trc != m_LastColorTrc) {
+        if (frame->color_trc == AVCOL_TRC_SMPTE2084) {
+            // Switch to Rec 2020 PQ (SMPTE ST 2084) colorspace for HDR10 rendering
+            hr = m_SwapChain->SetColorSpace1(DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020);
+            if (FAILED(hr)) {
+                SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                             "IDXGISwapChain::SetColorSpace1(DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020) failed: %x",
+                             hr);
+            }
+        }
+        else {
+            // Restore default sRGB colorspace
+            hr = m_SwapChain->SetColorSpace1(DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709);
+            if (FAILED(hr)) {
+                SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                             "IDXGISwapChain::SetColorSpace1(DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709) failed: %x",
+                             hr);
+            }
+        }
+
+        m_LastColorTrc = frame->color_trc;
+    }
+
     // Present according to the decoder parameters
-    HRESULT hr = m_SwapChain->Present(0, flags);
+    hr = m_SwapChain->Present(0, flags);
 
     // Release the context lock
     unlockContext(this);
@@ -813,7 +727,8 @@ void D3D11VARenderer::notifyOverlayUpdated(Overlay::OverlayType type)
     HRESULT hr;
 
     SDL_Surface* newSurface = Session::get()->getOverlayManager().getUpdatedOverlaySurface(type);
-    if (newSurface == nullptr && Session::get()->getOverlayManager().isOverlayEnabled(type)) {
+    bool overlayEnabled = Session::get()->getOverlayManager().isOverlayEnabled(type);
+    if (newSurface == nullptr && overlayEnabled) {
         // The overlay is enabled and there is no new surface. Leave the old texture alone.
         return;
     }
@@ -834,7 +749,7 @@ void D3D11VARenderer::notifyOverlayUpdated(Overlay::OverlayType type)
     SAFE_COM_RELEASE(oldVertexBuffer);
 
     // If the overlay is disabled, we're done
-    if (!Session::get()->getOverlayManager().isOverlayEnabled(type)) {
+    if (!overlayEnabled) {
         SDL_FreeSurface(newSurface);
         return;
     }
@@ -1092,6 +1007,29 @@ bool D3D11VARenderer::needsTestFrame()
     // horribly wrong and D3D11VideoDevice::CreateVideoDecoder() fails inside FFmpeg. We need to
     // catch that case before we commit to using D3D11VA.
     return true;
+}
+
+IFFmpegRenderer::InitFailureReason D3D11VARenderer::getInitFailureReason()
+{
+    // In the specific case where we found at least one D3D11 hardware device but none of the
+    // enumerated devices have support for the specified codec, tell the FFmpeg decoder not to
+    // bother trying other hwaccels. We don't want to try loading D3D9 if the device doesn't
+    // even have hardware support for the codec.
+    //
+    // NB: We use feature level 11.0 support as a gate here because we want to avoid returning
+    // this failure reason in cases where we might have an extremely old GPU with support for
+    // DXVA2 on D3D9 but not D3D11VA on D3D11. I'm unsure if any such drivers/hardware exists,
+    // but better be safe than sorry.
+    //
+    // NB2: We're also assuming that no GPU exists which lacks any D3D11 driver but has drivers
+    // for non-DX APIs like Vulkan. I believe this is a Windows Logo requirement so it should be
+    // safe to assume.
+    if (m_DevicesWithFL11Support != 0 && m_DevicesWithCodecSupport == 0) {
+        return InitFailureReason::NoHardwareSupport;
+    }
+    else {
+        return InitFailureReason::Unknown;
+    }
 }
 
 void D3D11VARenderer::lockContext(void *lock_ctx)

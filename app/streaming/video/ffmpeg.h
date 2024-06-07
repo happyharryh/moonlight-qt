@@ -26,6 +26,7 @@ public:
     virtual int submitDecodeUnit(PDECODE_UNIT du) override;
     virtual void renderFrameOnMainThread() override;
     virtual void setHdrMode(bool enabled) override;
+    virtual bool notifyWindowChanged(PWINDOW_STATE_CHANGE_INFO info) override;
 
     virtual IFFmpegRenderer* getBackendRenderer();
 
@@ -54,6 +55,7 @@ private:
                                enum AVPixelFormat requiredFormat,
                                PDECODER_PARAMETERS params,
                                const AVCodecHWConfig* hwConfig,
+                               IFFmpegRenderer::InitFailureReason* failureReason,
                                std::function<IFFmpegRenderer*()> createRendererFunc);
 
     static IFFmpegRenderer* createHwAccelRenderer(const AVCodecHWConfig* hwDecodeCfg, int pass);

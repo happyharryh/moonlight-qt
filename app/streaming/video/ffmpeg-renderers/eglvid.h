@@ -17,12 +17,13 @@ public:
     virtual void renderFrame(AVFrame* frame) override;
     virtual bool testRenderFrame(AVFrame* frame) override;
     virtual void notifyOverlayUpdated(Overlay::OverlayType) override;
+    virtual bool notifyWindowChanged(PWINDOW_STATE_CHANGE_INFO) override;
     virtual bool isPixelFormatSupported(int videoFormat, enum AVPixelFormat pixelFormat) override;
     virtual AVPixelFormat getPreferredPixelFormat(int videoFormat) override;
 
 private:
 
-    void renderOverlay(Overlay::OverlayType type);
+    void renderOverlay(Overlay::OverlayType type, int viewportWidth, int viewportHeight);
     unsigned compileShader(const char* vertexShaderSrc, const char* fragmentShaderSrc);
     bool compileShaders();
     bool specialize();
@@ -30,9 +31,6 @@ private:
     const float *getColorMatrix(const AVFrame* frame);
     static int loadAndBuildShader(int shaderType, const char *filename);
     bool openDisplay(unsigned int platform, void* nativeDisplay);
-
-    int m_ViewportWidth;
-    int m_ViewportHeight;
 
     AVPixelFormat m_EGLImagePixelFormat;
     void *m_EGLDisplay;

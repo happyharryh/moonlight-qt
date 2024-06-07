@@ -1,7 +1,6 @@
 #pragma once
 
 #include "renderer.h"
-#include "pacer/pacer.h"
 
 #include <d3d11_1.h>
 #include <dxgi1_5.h>
@@ -17,13 +16,12 @@ public:
     virtual ~D3D11VARenderer() override;
     virtual bool initialize(PDECODER_PARAMETERS params) override;
     virtual bool prepareDecoderContext(AVCodecContext* context, AVDictionary**) override;
-    virtual bool prepareDecoderContextInGetFormat(AVCodecContext* context, AVPixelFormat pixelFormat) override;
     virtual void renderFrame(AVFrame* frame) override;
     virtual void notifyOverlayUpdated(Overlay::OverlayType) override;
-    virtual void setHdrMode(bool enabled) override;
     virtual int getRendererAttributes() override;
     virtual int getDecoderCapabilities() override;
     virtual bool needsTestFrame() override;
+    virtual InitFailureReason getInitFailureReason() override;
 
 private:
     static void lockContext(void* lock_ctx);
@@ -38,6 +36,8 @@ private:
     bool createDeviceByAdapterIndex(int adapterIndex, bool* adapterNotFound = nullptr);
 
     int m_DecoderSelectionPass;
+    int m_DevicesWithFL11Support;
+    int m_DevicesWithCodecSupport;
 
     IDXGIFactory5* m_Factory;
     ID3D11Device* m_Device;
@@ -47,11 +47,11 @@ private:
     SDL_mutex* m_ContextLock;
 
     DECODER_PARAMETERS m_DecoderParams;
-    int m_TextureAlignment;
     int m_DisplayWidth;
     int m_DisplayHeight;
     int m_LastColorSpace;
     bool m_LastFullRange;
+    AVColorTransferCharacteristic m_LastColorTrc;
 
     bool m_AllowTearing;
 
@@ -70,6 +70,5 @@ private:
     ID3D11PixelShader* m_OverlayPixelShader;
 
     AVBufferRef* m_HwDeviceContext;
-    AVBufferRef* m_HwFramesContext;
 };
 

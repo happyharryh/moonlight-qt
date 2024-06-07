@@ -206,11 +206,8 @@ VAAPIRenderer::initialize(PDECODER_PARAMETERS params)
 {
     int err;
 
+    m_Window = params->window;
     m_VideoFormat = params->videoFormat;
-    m_VideoWidth = params->width;
-    m_VideoHeight = params->height;
-
-    SDL_GetWindowSize(params->window, &m_DisplayWidth, &m_DisplayHeight);
 
     m_HwContext = av_hwdevice_ctx_alloc(AV_HWDEVICE_TYPE_VAAPI);
     if (!m_HwContext) {
@@ -280,12 +277,21 @@ VAAPIRenderer::initialize(PDECODER_PARAMETERS params)
             break;
         }
 
+#if defined(APP_IMAGE) || defined(USE_FALLBACK_DRIVER_PATHS)
+        // AppImages will be running with our libva.so which means they don't know about
+        // distro-specific driver paths. To avoid failing in this scenario, we'll hardcode
+        // some such paths here for common distros. Non-AppImage packaging mechanisms won't
+        // need this fallback because either:
+        // a) They are using both distro libva.so and distro libva drivers (native packages)
+        // b) They are using both runtime libva.so and runtime libva drivers (Flatpak/Snap)
         if (qEnvironmentVariableIsEmpty("LIBVA_DRIVERS_PATH")) {
             SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                         "Trying fallback VAAPI driver paths");
 
             qputenv("LIBVA_DRIVERS_PATH",
         #if Q_PROCESSOR_WORDSIZE == 8
+                    "/usr/lib64/dri-nonfree:" // Fedora x86_64
+                    "/usr/lib64/dri-freeworld:" // Fedora x86_64
                     "/usr/lib64/dri:" // Fedora x86_64
                     "/usr/lib64/va/drivers:" // Gentoo x86_64
         #endif
@@ -299,7 +305,9 @@ VAAPIRenderer::initialize(PDECODER_PARAMETERS params)
                     );
            setPathVar = true;
         }
-        else {
+        else
+#endif
+        {
             if (setPathVar) {
                 // Unset LIBVA_DRIVERS_PATH if we set it ourselves
                 // and we didn't find any working VAAPI drivers.
@@ -328,6 +336,14 @@ VAAPIRenderer::initialize(PDECODER_PARAMETERS params)
                 "Driver: %s",
                 vendorString ? vendorString : "<unknown>");
 
+    // This is the libva-vdpau-driver which is not supported by our VAAPI renderer.
+    if (vendorStr.contains("Splitted-Desktop Systems VDPAU backend for VA-API")) {
+        // Fail and let our VDPAU renderer pick this up
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "Avoiding VDPAU wrapper for VAAPI decoding");
+        return false;
+    }
+
     // The Snap (core22) and Focal/Jammy Mesa drivers have a bug that causes
     // a large amount of video latency when using more than one reference frame
     // and severe rendering glitches on my Ryzen 3300U system.
@@ -341,8 +357,10 @@ VAAPIRenderer::initialize(PDECODER_PARAMETERS params)
         // Older versions of the Gallium VAAPI driver have a nasty memory leak that
         // causes memory to be leaked for each submitted frame. I believe this is
         // resolved in the libva2 drivers (VAAPI 1.x). We will try to use VDPAU
-        // instead for old VAAPI versions or drivers affected by the RFI latency bug.
-        if ((major == 0 || m_HasRfiLatencyBug) && vendorStr.contains("Gallium", Qt::CaseInsensitive)) {
+        // instead for old VAAPI versions or drivers affected by the RFI latency bug
+        // as long as we're not streaming HDR (which is unsupported by VDPAU).
+        if ((major == 0 || (m_HasRfiLatencyBug && !(m_VideoFormat & VIDEO_FORMAT_MASK_10BIT))) &&
+                vendorStr.contains("Gallium", Qt::CaseInsensitive)) {
             // Fail and let VDPAU pick this up
             SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
                         "Deprioritizing VAAPI on Gallium driver. Set FORCE_VAAPI=1 to override.");
@@ -369,14 +387,6 @@ VAAPIRenderer::initialize(PDECODER_PARAMETERS params)
         SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
                      "Failed to initialize VAAPI context: %d",
                      err);
-        return false;
-    }
-
-    // This quirk is set for the VDPAU wrapper which doesn't work with our VAAPI renderer
-    if (vaDeviceContext->driver_quirks & AV_VAAPI_DRIVER_QUIRK_SURFACE_ATTRIBUTES) {
-        // Fail and let our VDPAU renderer pick this up
-        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
-                    "Avoiding VDPAU wrapper for VAAPI decoding");
         return false;
     }
 
@@ -569,7 +579,8 @@ void VAAPIRenderer::notifyOverlayUpdated(Overlay::OverlayType type)
     }
 
     SDL_Surface* newSurface = Session::get()->getOverlayManager().getUpdatedOverlaySurface(type);
-    if (newSurface == nullptr && Session::get()->getOverlayManager().isOverlayEnabled(type)) {
+    bool overlayEnabled = Session::get()->getOverlayManager().isOverlayEnabled(type);
+    if (newSurface == nullptr && overlayEnabled) {
         // There's no updated surface and the overlay is enabled, so just leave the old surface alone.
         return;
     }
@@ -602,7 +613,7 @@ void VAAPIRenderer::notifyOverlayUpdated(Overlay::OverlayType type)
         }
     }
 
-    if (!Session::get()->getOverlayManager().isOverlayEnabled(type)) {
+    if (!overlayEnabled) {
         SDL_FreeSurface(newSurface);
         return;
     }
@@ -652,7 +663,7 @@ void VAAPIRenderer::notifyOverlayUpdated(Overlay::OverlayType type)
         if (type == Overlay::OverlayStatusUpdate) {
             // Bottom Left
             overlayRect.x = 0;
-            overlayRect.y = m_DisplayHeight - newSurface->h;
+            overlayRect.y = -newSurface->h;
         }
         else if (type == Overlay::OverlayDebug) {
             // Top left
@@ -684,6 +695,12 @@ void VAAPIRenderer::notifyOverlayUpdated(Overlay::OverlayType type)
     }
 }
 
+bool VAAPIRenderer::notifyWindowChanged(PWINDOW_STATE_CHANGE_INFO info)
+{
+    // We can transparently handle size and display changes
+    return !(info->stateChangeFlags & ~(WINDOW_STATE_CHANGE_SIZE | WINDOW_STATE_CHANGE_DISPLAY));
+}
+
 void
 VAAPIRenderer::renderFrame(AVFrame* frame)
 {
@@ -691,13 +708,16 @@ VAAPIRenderer::renderFrame(AVFrame* frame)
     AVHWDeviceContext* deviceContext = (AVHWDeviceContext*)m_HwContext->data;
     AVVAAPIDeviceContext* vaDeviceContext = (AVVAAPIDeviceContext*)deviceContext->hwctx;
 
+    int windowWidth, windowHeight;
+    SDL_GetWindowSize(m_Window, &windowWidth, &windowHeight);
+
     SDL_Rect src, dst;
     src.x = src.y = 0;
-    src.w = m_VideoWidth;
-    src.h = m_VideoHeight;
+    src.w = frame->width;
+    src.h = frame->height;
     dst.x = dst.y = 0;
-    dst.w = m_DisplayWidth;
-    dst.h = m_DisplayHeight;
+    dst.w = windowWidth;
+    dst.h = windowHeight;
 
     StreamUtils::scaleSourceToDestinationSurface(&src, &dst);
 
@@ -733,6 +753,16 @@ VAAPIRenderer::renderFrame(AVFrame* frame)
                 continue;
             }
 
+            SDL_Rect overlayRect = m_OverlayRect[type];
+
+            // Negative values are relative to the other side of the window
+            if (overlayRect.x < 0) {
+                overlayRect.x += windowWidth;
+            }
+            if (overlayRect.y < 0) {
+                overlayRect.y += windowHeight;
+            }
+
             status = vaAssociateSubpicture(vaDeviceContext->display,
                                            m_OverlaySubpicture[type],
                                            &surface,
@@ -741,10 +771,10 @@ VAAPIRenderer::renderFrame(AVFrame* frame)
                                            0,
                                            m_OverlayImage[type].width,
                                            m_OverlayImage[type].height,
-                                           m_OverlayRect[type].x,
-                                           m_OverlayRect[type].y,
-                                           m_OverlayRect[type].w,
-                                           m_OverlayRect[type].h,
+                                           overlayRect.x,
+                                           overlayRect.y,
+                                           overlayRect.w,
+                                           overlayRect.h,
                                            0);
             if (status == VA_STATUS_SUCCESS) {
                 // Take temporary ownership of the overlay to prevent notifyOverlayUpdated()
@@ -771,7 +801,7 @@ VAAPIRenderer::renderFrame(AVFrame* frame)
                      surface,
                      m_XWindow,
                      0, 0,
-                     m_VideoWidth, m_VideoHeight,
+                     frame->width, frame->height,
                      dst.x, dst.y,
                      dst.w, dst.h,
                      NULL, 0, flags);

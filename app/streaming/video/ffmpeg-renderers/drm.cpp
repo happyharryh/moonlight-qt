@@ -4,6 +4,7 @@
 #endif
 
 #include "drm.h"
+#include "string.h"
 
 extern "C" {
     #include <libavutil/hwcontext_drm.h>
@@ -11,7 +12,6 @@ extern "C" {
 
 #include <libdrm/drm_fourcc.h>
 #include <linux/dma-buf.h>
-#include <sys/ioctl.h>
 
 // Special Rockchip type
 #ifndef DRM_FORMAT_NA12
@@ -158,7 +158,8 @@ bool DrmRenderer::prepareDecoderContext(AVCodecContext* context, AVDictionary** 
 {
     // The out-of-tree LibreELEC patches use this option to control the type of the V4L2
     // buffers that we get back. We only support NV12 buffers now.
-    av_dict_set_int(options, "pixel_format", AV_PIX_FMT_NV12, 0);
+    if(strstr(context->codec->name, "_v4l2") != NULL)
+        av_dict_set_int(options, "pixel_format", AV_PIX_FMT_NV12, 0);
 
     // This option controls the pixel format for the h264_omx and hevc_omx decoders
     // used by the JH7110 multimedia stack. This decoder gives us software frames,
@@ -844,7 +845,7 @@ bool DrmRenderer::mapSoftwareFrame(AVFrame *frame, AVDRMFrameDescriptor *mappedF
         // Prepare to write to the dumb buffer from the CPU
         struct dma_buf_sync sync;
         sync.flags = DMA_BUF_SYNC_START | DMA_BUF_SYNC_WRITE;
-        ioctl(drmFrame->primeFd, DMA_BUF_IOCTL_SYNC, &sync);
+        drmIoctl(drmFrame->primeFd, DMA_BUF_IOCTL_SYNC, &sync);
 
         int lastPlaneSize = 0;
         for (int i = 0; i < 4; i++) {
@@ -898,7 +899,7 @@ bool DrmRenderer::mapSoftwareFrame(AVFrame *frame, AVDRMFrameDescriptor *mappedF
 
         // End the CPU write to the dumb buffer
         sync.flags = DMA_BUF_SYNC_END | DMA_BUF_SYNC_WRITE;
-        ioctl(drmFrame->primeFd, DMA_BUF_IOCTL_SYNC, &sync);
+        drmIoctl(drmFrame->primeFd, DMA_BUF_IOCTL_SYNC, &sync);
     }
 
     ret = true;

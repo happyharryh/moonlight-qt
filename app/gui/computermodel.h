@@ -16,6 +16,7 @@ class ComputerModel : public QAbstractListModel
         WakeableRole,
         StatusUnknownRole,
         ServerSupportedRole,
+        DetailsRole,
         ActiveAddress
     };
 

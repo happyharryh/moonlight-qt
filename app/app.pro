@@ -52,7 +52,7 @@ win32 {
     # Work around a conflict with math.h inclusion between SDL and Qt 6
     DEFINES += _USE_MATH_DEFINES
 }
-macx {
+macx:!disable-prebuilts {
     INCLUDEPATH += $$PWD/../libs/mac/include
     INCLUDEPATH += $$PWD/../libs/mac/Frameworks/SDL2.framework/Versions/A/Headers
     INCLUDEPATH += $$PWD/../libs/mac/Frameworks/SDL2_ttf.framework/Versions/A/Headers
@@ -64,7 +64,7 @@ macx {
     QMAKE_OBJECTIVE_CFLAGS += -F$$PWD/../libs/mac/Frameworks
 }
 
-unix:!macx {
+unix:if(!macx|disable-prebuilts) {
     CONFIG += link_pkgconfig
     PKGCONFIG += openssl sdl2 SDL2_ttf opus
 
@@ -152,13 +152,17 @@ win32:!winrt {
     CONFIG += soundio discord-rpc
 }
 macx {
-    LIBS += -lssl -lcrypto -lavcodec.61 -lavutil.59 -lopus -framework SDL2 -framework SDL2_ttf
+    !disable-prebuilts {
+        LIBS += -lssl -lcrypto -lavcodec.61 -lavutil.59 -lopus -framework SDL2 -framework SDL2_ttf
+        CONFIG += discord-rpc
+    }
+
     LIBS += -lobjc -framework VideoToolbox -framework AVFoundation -framework CoreVideo -framework CoreGraphics -framework CoreMedia -framework AppKit -framework Metal -framework QuartzCore
 
     # For libsoundio
     LIBS += -framework CoreAudio -framework AudioUnit
 
-    CONFIG += ffmpeg soundio discord-rpc
+    CONFIG += ffmpeg soundio
 }
 
 SOURCES += \
@@ -465,7 +469,8 @@ TRANSLATIONS += \
     languages/qml_pl.ts \
     languages/qml_cs.ts \
     languages/qml_he.ts \
-    languages/qml_ckb.ts
+    languages/qml_ckb.ts \
+    languages/qml_lt.ts
 
 # Additional import path used to resolve QML modules in Qt Creator's code model
 QML_IMPORT_PATH =
@@ -554,15 +559,19 @@ macx {
     APP_BUNDLE_RESOURCES.files = moonlight.icns
     APP_BUNDLE_RESOURCES.path = Contents/Resources
 
-    APP_BUNDLE_FRAMEWORKS.files = $$files(../libs/mac/Frameworks/*.framework, true) $$files(../libs/mac/lib/*.dylib, true)
-    APP_BUNDLE_FRAMEWORKS.path = Contents/Frameworks
-
     APP_BUNDLE_PLIST.files = $$OUT_PWD/Info.plist
     APP_BUNDLE_PLIST.path = Contents
 
-    QMAKE_BUNDLE_DATA += APP_BUNDLE_RESOURCES APP_BUNDLE_FRAMEWORKS APP_BUNDLE_PLIST
+    QMAKE_BUNDLE_DATA += APP_BUNDLE_RESOURCES APP_BUNDLE_PLIST
 
-    QMAKE_RPATHDIR += @executable_path/../Frameworks
+    !disable-prebuilts {
+        APP_BUNDLE_FRAMEWORKS.files = $$files(../libs/mac/Frameworks/*.framework, true) $$files(../libs/mac/lib/*.dylib, true)
+        APP_BUNDLE_FRAMEWORKS.path = Contents/Frameworks
+
+        QMAKE_BUNDLE_DATA += APP_BUNDLE_FRAMEWORKS
+
+        QMAKE_RPATHDIR += @executable_path/../Frameworks
+    }
 }
 
 VERSION = "$$cat(version.txt)"

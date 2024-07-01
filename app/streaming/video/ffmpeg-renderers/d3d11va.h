@@ -16,6 +16,7 @@ public:
     virtual ~D3D11VARenderer() override;
     virtual bool initialize(PDECODER_PARAMETERS params) override;
     virtual bool prepareDecoderContext(AVCodecContext* context, AVDictionary**) override;
+    virtual bool prepareDecoderContextInGetFormat(AVCodecContext* context, AVPixelFormat pixelFormat) override;
     virtual void renderFrame(AVFrame* frame) override;
     virtual void notifyOverlayUpdated(Overlay::OverlayType) override;
     virtual int getRendererAttributes() override;
@@ -28,7 +29,8 @@ private:
     static void unlockContext(void* lock_ctx);
 
     bool setupRenderingResources();
-    bool setupVideoTexture();
+    bool setupVideoTexture(); // for !m_BindDecoderOutputTextures
+    bool setupTexturePoolViews(AVD3D11VAFramesContext* frameContext); // for m_BindDecoderOutputTextures
     void renderOverlay(Overlay::OverlayType type);
     void bindColorConversion(AVFrame* frame);
     void renderVideo(AVFrame* frame);
@@ -45,8 +47,10 @@ private:
     ID3D11DeviceContext* m_DeviceContext;
     ID3D11RenderTargetView* m_RenderTargetView;
     SDL_mutex* m_ContextLock;
+    bool m_BindDecoderOutputTextures;
 
     DECODER_PARAMETERS m_DecoderParams;
+    int m_TextureAlignment;
     int m_DisplayWidth;
     int m_DisplayHeight;
     int m_LastColorSpace;
@@ -60,8 +64,12 @@ private:
     ID3D11PixelShader* m_VideoBt2020LimPixelShader;
     ID3D11Buffer* m_VideoVertexBuffer;
 
+    // Only valid if !m_BindDecoderOutputTextures
     ID3D11Texture2D* m_VideoTexture;
-    ID3D11ShaderResourceView* m_VideoTextureResourceViews[2];
+
+    // Only index 0 is valid if !m_BindDecoderOutputTextures
+#define DECODER_BUFFER_POOL_SIZE 17
+    ID3D11ShaderResourceView* m_VideoTextureResourceViews[DECODER_BUFFER_POOL_SIZE][2];
 
     SDL_SpinLock m_OverlayLock;
     ID3D11Buffer* m_OverlayVertexBuffers[Overlay::OverlayMax];
@@ -70,5 +78,6 @@ private:
     ID3D11PixelShader* m_OverlayPixelShader;
 
     AVBufferRef* m_HwDeviceContext;
+    AVBufferRef* m_HwFramesContext;
 };
 

@@ -54,6 +54,14 @@ bool SdlRenderer::prepareDecoderContext(AVCodecContext*, AVDictionary**)
     return true;
 }
 
+void SdlRenderer::prepareToRender()
+{
+    // Draw a black frame until the video stream starts rendering
+    SDL_SetRenderDrawColor(m_Renderer, 0, 0, 0, SDL_ALPHA_OPAQUE);
+    SDL_RenderClear(m_Renderer);
+    SDL_RenderPresent(m_Renderer);
+}
+
 bool SdlRenderer::isRenderThreadSupported()
 {
     SDL_RendererInfo info;
@@ -163,13 +171,6 @@ bool SdlRenderer::initialize(PDECODER_PARAMETERS params)
         // If we get here prior to the start of a session, just pump and flush ourselves.
         SDL_PumpEvents();
         SDL_FlushEvent(SDL_WINDOWEVENT);
-    }
-
-    if (!params->testOnly) {
-        // Draw a black frame until the video stream starts rendering
-        SDL_SetRenderDrawColor(m_Renderer, 0, 0, 0, SDL_ALPHA_OPAQUE);
-        SDL_RenderClear(m_Renderer);
-        SDL_RenderPresent(m_Renderer);
     }
 
 #ifdef Q_OS_WIN32
@@ -495,6 +496,11 @@ bool SdlRenderer::testRenderFrame(AVFrame* frame)
 
 bool SdlRenderer::notifyWindowChanged(PWINDOW_STATE_CHANGE_INFO info)
 {
-    // We can transparently handle size and display changes
+    // We can transparently handle size and display changes, except Windows where
+    // changing size appears to break the renderer (maybe due to the render thread?)
+#ifdef Q_OS_WIN32
+    return !(info->stateChangeFlags & ~(WINDOW_STATE_CHANGE_DISPLAY));
+#else
     return !(info->stateChangeFlags & ~(WINDOW_STATE_CHANGE_SIZE | WINDOW_STATE_CHANGE_DISPLAY));
+#endif
 }

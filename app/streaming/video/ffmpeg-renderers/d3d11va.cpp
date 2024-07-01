@@ -93,7 +93,8 @@ D3D11VARenderer::D3D11VARenderer(int decoderSelectionPass)
       m_VideoTexture(nullptr),
       m_OverlayLock(0),
       m_OverlayPixelShader(nullptr),
-      m_HwDeviceContext(nullptr)
+      m_HwDeviceContext(nullptr),
+      m_HwFramesContext(nullptr)
 {
     RtlZeroMemory(m_OverlayVertexBuffers, sizeof(m_OverlayVertexBuffers));
     RtlZeroMemory(m_OverlayTextures, sizeof(m_OverlayTextures));
@@ -117,7 +118,8 @@ D3D11VARenderer::~D3D11VARenderer()
     SAFE_COM_RELEASE(m_VideoGenericPixelShader);
 
     for (int i = 0; i < ARRAYSIZE(m_VideoTextureResourceViews); i++) {
-        SAFE_COM_RELEASE(m_VideoTextureResourceViews[i]);
+        SAFE_COM_RELEASE(m_VideoTextureResourceViews[i][0]);
+        SAFE_COM_RELEASE(m_VideoTextureResourceViews[i][1]);
     }
 
     SAFE_COM_RELEASE(m_VideoTexture);
@@ -139,6 +141,10 @@ D3D11VARenderer::~D3D11VARenderer()
     SAFE_COM_RELEASE(m_RenderTargetView);
     SAFE_COM_RELEASE(m_SwapChain);
 
+    if (m_HwFramesContext != nullptr) {
+        av_buffer_unref(&m_HwFramesContext);
+    }
+
     // Force destruction of the swapchain immediately
     if (m_DeviceContext != nullptr) {
         m_DeviceContext->ClearState();
@@ -159,6 +165,7 @@ D3D11VARenderer::~D3D11VARenderer()
 
 bool D3D11VARenderer::createDeviceByAdapterIndex(int adapterIndex, bool* adapterNotFound)
 {
+    const D3D_FEATURE_LEVEL supportedFeatureLevels[] = { D3D_FEATURE_LEVEL_11_0, D3D_FEATURE_LEVEL_11_1 };
     bool success = false;
     IDXGIAdapter1* adapter = nullptr;
     DXGI_ADAPTER_DESC1 adapterDesc;
@@ -193,12 +200,26 @@ bool D3D11VARenderer::createDeviceByAdapterIndex(int adapterIndex, bool* adapter
         goto Exit;
     }
 
+    bool ok;
+    m_BindDecoderOutputTextures = !!qEnvironmentVariableIntValue("D3D11VA_FORCE_BIND", &ok);
+    if (!ok) {
+        // Skip copying to our own internal texture on Intel GPUs due to
+        // significant performance impact of the extra copy. See:
+        // https://github.com/moonlight-stream/moonlight-qt/issues/1304
+        m_BindDecoderOutputTextures = adapterDesc.VendorId == 0x8086;
+    }
+    else {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "Using D3D11VA_FORCE_BIND to override default bind/copy logic");
+    }
+
     SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                "Detected GPU %d: %S (%x:%x)",
+                "Detected GPU %d: %S (%x:%x) (decoder output: %s)",
                 adapterIndex,
                 adapterDesc.Description,
                 adapterDesc.VendorId,
-                adapterDesc.DeviceId);
+                adapterDesc.DeviceId,
+                m_BindDecoderOutputTextures ? "bind" : "copy");
 
     hr = D3D11CreateDevice(adapter,
                            D3D_DRIVER_TYPE_UNKNOWN,
@@ -208,8 +229,8 @@ bool D3D11VARenderer::createDeviceByAdapterIndex(int adapterIndex, bool* adapter
                                | D3D11_CREATE_DEVICE_DEBUG
                        #endif
                            ,
-                           nullptr,
-                           0,
+                           supportedFeatureLevels,
+                           ARRAYSIZE(supportedFeatureLevels),
                            D3D11_SDK_VERSION,
                            &m_Device,
                            &featureLevel,
@@ -429,6 +450,10 @@ bool D3D11VARenderer::initialize(PDECODER_PARAMETERS params)
         return false;
     }
 
+    // Surfaces must be 16 pixel aligned for H.264 and 128 pixel aligned for everything else
+    // https://github.com/FFmpeg/FFmpeg/blob/a234e5cd80224c95a205c1f3e297d8c04a1374c3/libavcodec/dxva2.c#L609-L616
+    m_TextureAlignment = (params->videoFormat & VIDEO_FORMAT_MASK_H264) ? 16 : 128;
+
     if (!setupRenderingResources()) {
         return false;
     }
@@ -462,9 +487,55 @@ bool D3D11VARenderer::initialize(PDECODER_PARAMETERS params)
         }
     }
 
-    // Create our video texture and SRVs
-    if (!setupVideoTexture()) {
-        return false;
+    {
+        m_HwFramesContext = av_hwframe_ctx_alloc(m_HwDeviceContext);
+        if (!m_HwFramesContext) {
+            SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                        "Failed to allocate D3D11VA frame context");
+            return false;
+        }
+
+        AVHWFramesContext* framesContext = (AVHWFramesContext*)m_HwFramesContext->data;
+
+        // We require NV12 or P010 textures for our shader
+        framesContext->format = AV_PIX_FMT_D3D11;
+        framesContext->sw_format = (params->videoFormat & VIDEO_FORMAT_MASK_10BIT) ?
+                    AV_PIX_FMT_P010 : AV_PIX_FMT_NV12;
+
+        framesContext->width = FFALIGN(params->width, m_TextureAlignment);
+        framesContext->height = FFALIGN(params->height, m_TextureAlignment);
+
+        // We can have up to 16 reference frames plus a working surface
+        framesContext->initial_pool_size = DECODER_BUFFER_POOL_SIZE;
+
+        AVD3D11VAFramesContext* d3d11vaFramesContext = (AVD3D11VAFramesContext*)framesContext->hwctx;
+
+        d3d11vaFramesContext->BindFlags = D3D11_BIND_DECODER;
+        if (m_BindDecoderOutputTextures) {
+            // We need to override the default D3D11VA bind flags to bind the textures as a shader resources
+            d3d11vaFramesContext->BindFlags |= D3D11_BIND_SHADER_RESOURCE;
+        }
+
+        int err = av_hwframe_ctx_init(m_HwFramesContext);
+        if (err < 0) {
+            SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                         "Failed to initialize D3D11VA frame context: %d",
+                         err);
+            return false;
+        }
+
+        if (m_BindDecoderOutputTextures) {
+            // Create SRVs for all textures in the decoder pool
+            if (!setupTexturePoolViews(d3d11vaFramesContext)) {
+                return false;
+            }
+        }
+        else {
+            // Create our internal texture to copy and render
+            if (!setupVideoTexture()) {
+                return false;
+            }
+        }
     }
 
     return true;
@@ -476,6 +547,14 @@ bool D3D11VARenderer::prepareDecoderContext(AVCodecContext* context, AVDictionar
 
     SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                 "Using D3D11VA accelerated renderer");
+
+    return true;
+}
+
+bool D3D11VARenderer::prepareDecoderContextInGetFormat(AVCodecContext *context, AVPixelFormat)
+{
+    // hw_frames_ctx must be initialized in ffGetFormat().
+    context->hw_frames_ctx = av_buffer_ref(m_HwFramesContext);
 
     return true;
 }
@@ -678,7 +757,7 @@ void D3D11VARenderer::bindColorConversion(AVFrame* frame)
         ID3D11Buffer* constantBuffer;
         HRESULT hr = m_Device->CreateBuffer(&constDesc, &constData, &constantBuffer);
         if (SUCCEEDED(hr)) {
-            m_DeviceContext->PSSetConstantBuffers(0, 1, &constantBuffer);
+            m_DeviceContext->PSSetConstantBuffers(1, 1, &constantBuffer);
             constantBuffer->Release();
         }
         else {
@@ -700,24 +779,46 @@ void D3D11VARenderer::renderVideo(AVFrame* frame)
     UINT offset = 0;
     m_DeviceContext->IASetVertexBuffers(0, 1, &m_VideoVertexBuffer, &stride, &offset);
 
-    // Copy this frame (minus alignment padding) into our video texture
-    D3D11_BOX srcBox;
-    srcBox.left = 0;
-    srcBox.top = 0;
-    srcBox.right = m_DecoderParams.width;
-    srcBox.bottom = m_DecoderParams.height;
-    srcBox.front = 0;
-    srcBox.back = 1;
-    m_DeviceContext->CopySubresourceRegion(m_VideoTexture, 0, 0, 0, 0, (ID3D11Resource*)frame->data[0], (int)(intptr_t)frame->data[1], &srcBox);
+    UINT srvIndex;
+    if (m_BindDecoderOutputTextures) {
+        // Our indexing logic depends on a direct mapping into m_VideoTextureResourceViews
+        // based on the texture index provided by FFmpeg.
+        srvIndex = (uintptr_t)frame->data[1];
+        SDL_assert(srvIndex < DECODER_BUFFER_POOL_SIZE);
+        if (srvIndex >= DECODER_BUFFER_POOL_SIZE) {
+            SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                         "Unexpected texture index: %u",
+                         srvIndex);
+            return;
+        }
+    }
+    else {
+        // Copy this frame (minus alignment padding) into our video texture
+        D3D11_BOX srcBox;
+        srcBox.left = 0;
+        srcBox.top = 0;
+        srcBox.right = m_DecoderParams.width;
+        srcBox.bottom = m_DecoderParams.height;
+        srcBox.front = 0;
+        srcBox.back = 1;
+        m_DeviceContext->CopySubresourceRegion(m_VideoTexture, 0, 0, 0, 0, (ID3D11Resource*)frame->data[0], (int)(intptr_t)frame->data[1], &srcBox);
+
+        // SRV 0 is always mapped to the video texture
+        srvIndex = 0;
+    }
 
     // Bind our CSC shader (and constant buffer, if required)
     bindColorConversion(frame);
 
     // Bind SRVs for this frame
-    m_DeviceContext->PSSetShaderResources(0, 2, m_VideoTextureResourceViews);
+    m_DeviceContext->PSSetShaderResources(0, 2, m_VideoTextureResourceViews[srvIndex]);
 
     // Draw the video
     m_DeviceContext->DrawIndexed(6, 0, 0);
+
+    // Unbind SRVs for this frame
+    ID3D11ShaderResourceView* nullSrvs[2] = {};
+    m_DeviceContext->PSSetShaderResources(0, 2, nullSrvs);
 }
 
 // This function must NOT use any DXGI or ID3D11DeviceContext methods
@@ -1229,12 +1330,17 @@ bool D3D11VARenderer::setupRenderingResources()
         SDL_FRect renderRect;
         StreamUtils::screenSpaceToNormalizedDeviceCoords(&dst, &renderRect, m_DisplayWidth, m_DisplayHeight);
 
+        // If we're binding the decoder output textures directly, don't sample from the alignment padding area
+        SDL_assert(m_TextureAlignment != 0);
+        float uMax = m_BindDecoderOutputTextures ? ((float)m_DecoderParams.width / FFALIGN(m_DecoderParams.width, m_TextureAlignment)) : 1.0f;
+        float vMax = m_BindDecoderOutputTextures ? ((float)m_DecoderParams.height / FFALIGN(m_DecoderParams.height, m_TextureAlignment)) : 1.0f;
+
         VERTEX verts[] =
         {
-            {renderRect.x, renderRect.y, 0, 1.0f},
+            {renderRect.x, renderRect.y, 0, vMax},
             {renderRect.x, renderRect.y+renderRect.h, 0, 0},
-            {renderRect.x+renderRect.w, renderRect.y, 1.0f, 1.0f},
-            {renderRect.x+renderRect.w, renderRect.y+renderRect.h, 1.0f, 0},
+            {renderRect.x+renderRect.w, renderRect.y, uMax, vMax},
+            {renderRect.x+renderRect.w, renderRect.y+renderRect.h, uMax, 0},
         };
 
         D3D11_BUFFER_DESC vbDesc = {};
@@ -1250,6 +1356,39 @@ bool D3D11VARenderer::setupRenderingResources()
 
         hr = m_Device->CreateBuffer(&vbDesc, &vbData, &m_VideoVertexBuffer);
         if (FAILED(hr)) {
+            SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                         "ID3D11Device::CreateBuffer() failed: %x",
+                         hr);
+            return false;
+        }
+    }
+
+    // Create our fixed constant buffer to limit chroma texcoords and avoid sampling from alignment texels.
+    {
+        D3D11_BUFFER_DESC constDesc = {};
+        constDesc.ByteWidth = sizeof(CSC_CONST_BUF);
+        constDesc.Usage = D3D11_USAGE_IMMUTABLE;
+        constDesc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+        constDesc.CPUAccessFlags = 0;
+        constDesc.MiscFlags = 0;
+
+        int textureWidth = m_BindDecoderOutputTextures ? FFALIGN(m_DecoderParams.width, m_TextureAlignment) : m_DecoderParams.width;
+        int textureHeight = m_BindDecoderOutputTextures ? FFALIGN(m_DecoderParams.height, m_TextureAlignment) : m_DecoderParams.height;
+
+        float chromaUVMax[3] = {};
+        chromaUVMax[0] = m_DecoderParams.width != textureWidth ? ((float)(m_DecoderParams.width - 1) / textureWidth) : 1.0f;
+        chromaUVMax[1] = m_DecoderParams.height != textureHeight ? ((float)(m_DecoderParams.height - 1) / textureHeight) : 1.0f;
+
+        D3D11_SUBRESOURCE_DATA constData = {};
+        constData.pSysMem = chromaUVMax;
+
+        ID3D11Buffer* constantBuffer;
+        HRESULT hr = m_Device->CreateBuffer(&constDesc, &constData, &constantBuffer);
+        if (SUCCEEDED(hr)) {
+            m_DeviceContext->PSSetConstantBuffers(0, 1, &constantBuffer);
+            constantBuffer->Release();
+        }
+        else {
             SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
                          "ID3D11Device::CreateBuffer() failed: %x",
                          hr);
@@ -1304,6 +1443,8 @@ bool D3D11VARenderer::setupRenderingResources()
 
 bool D3D11VARenderer::setupVideoTexture()
 {
+    SDL_assert(!m_BindDecoderOutputTextures);
+
     HRESULT hr;
     D3D11_TEXTURE2D_DESC texDesc = {};
 
@@ -1334,9 +1475,9 @@ bool D3D11VARenderer::setupVideoTexture()
     srvDesc.Texture2D.MostDetailedMip = 0;
     srvDesc.Texture2D.MipLevels = 1;
     srvDesc.Format = (m_DecoderParams.videoFormat & VIDEO_FORMAT_MASK_10BIT) ? DXGI_FORMAT_R16_UNORM : DXGI_FORMAT_R8_UNORM;
-    hr = m_Device->CreateShaderResourceView(m_VideoTexture, &srvDesc, &m_VideoTextureResourceViews[0]);
+    hr = m_Device->CreateShaderResourceView(m_VideoTexture, &srvDesc, &m_VideoTextureResourceViews[0][0]);
     if (FAILED(hr)) {
-        m_VideoTextureResourceViews[0] = nullptr;
+        m_VideoTextureResourceViews[0][0] = nullptr;
         SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
                      "ID3D11Device::CreateShaderResourceView() failed: %x",
                      hr);
@@ -1344,13 +1485,56 @@ bool D3D11VARenderer::setupVideoTexture()
     }
 
     srvDesc.Format = (m_DecoderParams.videoFormat & VIDEO_FORMAT_MASK_10BIT) ? DXGI_FORMAT_R16G16_UNORM : DXGI_FORMAT_R8G8_UNORM;
-    hr = m_Device->CreateShaderResourceView(m_VideoTexture, &srvDesc, &m_VideoTextureResourceViews[1]);
+    hr = m_Device->CreateShaderResourceView(m_VideoTexture, &srvDesc, &m_VideoTextureResourceViews[0][1]);
     if (FAILED(hr)) {
-        m_VideoTextureResourceViews[1] = nullptr;
+        m_VideoTextureResourceViews[0][1] = nullptr;
         SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
                      "ID3D11Device::CreateShaderResourceView() failed: %x",
                      hr);
         return false;
+    }
+
+    return true;
+}
+
+bool D3D11VARenderer::setupTexturePoolViews(AVD3D11VAFramesContext* frameContext)
+{
+    SDL_assert(m_BindDecoderOutputTextures);
+
+    D3D11_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
+    srvDesc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2DARRAY;
+    srvDesc.Texture2DArray.MostDetailedMip = 0;
+    srvDesc.Texture2DArray.MipLevels = 1;
+    srvDesc.Texture2DArray.ArraySize = 1;
+
+    // Create luminance and chrominance SRVs for each texture in the pool
+    for (int i = 0; i < DECODER_BUFFER_POOL_SIZE; i++) {
+        HRESULT hr;
+
+        // Our rendering logic depends on the texture index working to map into our SRV array
+        SDL_assert(i == frameContext->texture_infos[i].index);
+
+        srvDesc.Texture2DArray.FirstArraySlice = frameContext->texture_infos[i].index;
+
+        srvDesc.Format = (m_DecoderParams.videoFormat & VIDEO_FORMAT_MASK_10BIT) ? DXGI_FORMAT_R16_UNORM : DXGI_FORMAT_R8_UNORM;
+        hr = m_Device->CreateShaderResourceView(frameContext->texture_infos[i].texture, &srvDesc, &m_VideoTextureResourceViews[i][0]);
+        if (FAILED(hr)) {
+            m_VideoTextureResourceViews[i][0] = nullptr;
+            SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                         "ID3D11Device::CreateShaderResourceView() failed: %x",
+                         hr);
+            return false;
+        }
+
+        srvDesc.Format = (m_DecoderParams.videoFormat & VIDEO_FORMAT_MASK_10BIT) ? DXGI_FORMAT_R16G16_UNORM : DXGI_FORMAT_R8G8_UNORM;
+        hr = m_Device->CreateShaderResourceView(frameContext->texture_infos[i].texture, &srvDesc, &m_VideoTextureResourceViews[i][1]);
+        if (FAILED(hr)) {
+            m_VideoTextureResourceViews[i][1] = nullptr;
+            SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                         "ID3D11Device::CreateShaderResourceView() failed: %x",
+                         hr);
+            return false;
+        }
     }
 
     return true;

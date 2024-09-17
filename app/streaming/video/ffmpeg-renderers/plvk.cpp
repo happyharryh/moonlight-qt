@@ -56,23 +56,26 @@ static void pl_log_cb(void*, enum pl_log_level level, const char *msg)
 {
     switch (level) {
     case PL_LOG_FATAL:
-        SDL_LogCritical(SDL_LOG_CATEGORY_APPLICATION, "%s", msg);
+        SDL_LogCritical(SDL_LOG_CATEGORY_APPLICATION, "libplacebo: %s", msg);
         break;
     case PL_LOG_ERR:
-        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION, "%s", msg);
+        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION, "libplacebo: %s", msg);
         break;
     case PL_LOG_WARN:
-        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION, "%s", msg);
+        if (strncmp(msg, "Masking `", 9) == 0) {
+            return;
+        }
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION, "libplacebo: %s", msg);
         break;
     case PL_LOG_INFO:
-        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "%s", msg);
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "libplacebo: %s", msg);
         break;
     case PL_LOG_DEBUG:
-        SDL_LogDebug(SDL_LOG_CATEGORY_APPLICATION, "%s", msg);
+        SDL_LogDebug(SDL_LOG_CATEGORY_APPLICATION, "libplacebo: %s", msg);
         break;
     case PL_LOG_NONE:
     case PL_LOG_TRACE:
-        SDL_LogVerbose(SDL_LOG_CATEGORY_APPLICATION, "%s", msg);
+        SDL_LogVerbose(SDL_LOG_CATEGORY_APPLICATION, "libplacebo: %s", msg);
         break;
     }
 }
@@ -94,8 +97,9 @@ void PlVkRenderer::overlayUploadComplete(void* opaque)
     SDL_FreeSurface((SDL_Surface*)opaque);
 }
 
-PlVkRenderer::PlVkRenderer(IFFmpegRenderer* backendRenderer) :
-    m_Backend(backendRenderer)
+PlVkRenderer::PlVkRenderer(bool hwaccel, IFFmpegRenderer *backendRenderer) :
+    m_Backend(backendRenderer),
+    m_HwAccelBackend(hwaccel)
 {
     bool ok;
 
@@ -239,8 +243,20 @@ bool PlVkRenderer::tryInitializeDevice(VkPhysicalDevice device, VkPhysicalDevice
         return false;
     }
 
+#ifdef Q_OS_WIN32
+    // Intel's Windows drivers seem to have interoperability issues as of FFmpeg 7.0.1
+    // when using Vulkan Video decoding. Since they also expose HEVC REXT profiles using
+    // D3D11VA, let's reject them here so we can select a different Vulkan device or
+    // just allow D3D11VA to take over.
+    if (m_HwAccelBackend && deviceProps->vendorID == 0x8086 && !qEnvironmentVariableIntValue("PLVK_ALLOW_INTEL")) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "Skipping Intel GPU for Vulkan Video due to broken drivers");
+        return false;
+    }
+#endif
+
     // If we're acting as the decoder backend, we need a physical device with Vulkan video support
-    if (m_Backend == nullptr) {
+    if (m_HwAccelBackend) {
         const char* videoDecodeExtension;
 
         if (decoderParams->videoFormat & VIDEO_FORMAT_MASK_H264) {
@@ -467,7 +483,7 @@ bool PlVkRenderer::initialize(PDECODER_PARAMETERS params)
     }
 
     // We only need an hwaccel device context if we're going to act as the backend renderer too
-    if (m_Backend == nullptr) {
+    if (m_HwAccelBackend) {
         m_HwDeviceCtx = av_hwdevice_ctx_alloc(AV_HWDEVICE_TYPE_VULKAN);
         if (m_HwDeviceCtx == nullptr) {
             SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
@@ -521,13 +537,17 @@ bool PlVkRenderer::initialize(PDECODER_PARAMETERS params)
 
 bool PlVkRenderer::prepareDecoderContext(AVCodecContext *context, AVDictionary **)
 {
-    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                "Using Vulkan video decoding");
+    if (m_HwAccelBackend) {
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                    "Using Vulkan video decoding");
 
-    // This should only be called when we're acting as the decoder backend
-    SDL_assert(m_Backend == nullptr);
+        context->hw_device_ctx = av_buffer_ref(m_HwDeviceCtx);
+    }
+    else {
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                    "Using Vulkan renderer");
+    }
 
-    context->hw_device_ctx = av_buffer_ref(m_HwDeviceCtx);
     return true;
 }
 
@@ -551,6 +571,12 @@ bool PlVkRenderer::mapAvFrameToPlacebo(const AVFrame *frame, pl_frame* mappedFra
     if (av_frame_get_side_data(frame, AV_FRAME_DATA_MASTERING_DISPLAY_METADATA) && !mappedFrame->color.hdr.min_luma) {
         mappedFrame->color.hdr.min_luma = PL_COLOR_HDR_BLACK;
     }
+
+    // HACK: AMF AV1 encoding on the host PC does not set full color range properly in the
+    // bitstream data, so libplacebo incorrectly renders the content as limited range.
+    //
+    // As a workaround, set full range manually in the mapped frame ourselves.
+    mappedFrame->repr.levels = PL_COLOR_LEVELS_FULL;
 
     return true;
 }
@@ -635,11 +661,16 @@ void PlVkRenderer::waitToRender()
         return;
     }
 
+#ifndef Q_OS_WIN32
     // With libplacebo's Vulkan backend, all swap_buffers does is wait for queued
     // presents to finish. This happens to be exactly what we want to do here, since
     // it lets us wait to select a queued frame for rendering until we know that we
     // can present without blocking in renderFrame().
+    //
+    // NB: This seems to cause performance problems with the Windows display stack
+    // (particularly on Nvidia) so we will only do this for non-Windows platforms.
     pl_swapchain_swap_buffers(m_Swapchain);
+#endif
 
     // Handle the swapchain being resized
     int vkDrawableW, vkDrawableH;
@@ -792,6 +823,12 @@ void PlVkRenderer::renderFrame(AVFrame *frame)
         goto UnmapExit;
     }
 
+#ifdef Q_OS_WIN32
+    // On Windows, we swap buffers here instead of waitToRender()
+    // to avoid some performance problems on Nvidia GPUs.
+    pl_swapchain_swap_buffers(m_Swapchain);
+#endif
+
 UnmapExit:
     // Delete any textures that need to be destroyed
     for (pl_tex texture : texturesToDestroy) {
@@ -912,9 +949,16 @@ int PlVkRenderer::getRendererAttributes()
     return RENDERER_ATTRIBUTE_HDR_SUPPORT;
 }
 
+int PlVkRenderer::getDecoderColorspace()
+{
+    // We rely on libplacebo for color conversion, pick colorspace with the same primaries as sRGB
+    return COLORSPACE_REC_709;
+}
+
 int PlVkRenderer::getDecoderColorRange()
 {
-    // Explicitly set the color range to full to fix raised black levels on OLED displays
+    // Explicitly set the color range to full to fix raised black levels on OLED displays,
+    // should also reduce banding artifacts in all situations
     return COLOR_RANGE_FULL;
 }
 
@@ -932,11 +976,59 @@ bool PlVkRenderer::needsTestFrame()
 
 bool PlVkRenderer::isPixelFormatSupported(int videoFormat, AVPixelFormat pixelFormat)
 {
-    if (m_Backend) {
+    if (m_HwAccelBackend) {
+        return pixelFormat == AV_PIX_FMT_VULKAN;
+    }
+    else if (m_Backend) {
         return m_Backend->isPixelFormatSupported(videoFormat, pixelFormat);
     }
     else {
-        return IFFmpegRenderer::isPixelFormatSupported(videoFormat, pixelFormat);
+        if (pixelFormat == AV_PIX_FMT_VULKAN) {
+            // Vulkan frames are always supported
+            return true;
+        }
+        else if (videoFormat & VIDEO_FORMAT_MASK_YUV444) {
+            if (videoFormat & VIDEO_FORMAT_MASK_10BIT) {
+                switch (pixelFormat) {
+                case AV_PIX_FMT_P410:
+                case AV_PIX_FMT_YUV444P10:
+                    return true;
+                default:
+                    return false;
+                }
+            }
+            else {
+                switch (pixelFormat) {
+                case AV_PIX_FMT_NV24:
+                case AV_PIX_FMT_NV42:
+                case AV_PIX_FMT_YUV444P:
+                case AV_PIX_FMT_YUVJ444P:
+                    return true;
+                default:
+                    return false;
+                }
+            }
+        }
+        else if (videoFormat & VIDEO_FORMAT_MASK_10BIT) {
+            switch (pixelFormat) {
+            case AV_PIX_FMT_P010:
+            case AV_PIX_FMT_YUV420P10:
+                return true;
+            default:
+                return false;
+            }
+        }
+        else {
+            switch (pixelFormat) {
+            case AV_PIX_FMT_NV12:
+            case AV_PIX_FMT_NV21:
+            case AV_PIX_FMT_YUV420P:
+            case AV_PIX_FMT_YUVJ420P:
+                return true;
+            default:
+                return false;
+            }
+        }
     }
 }
 

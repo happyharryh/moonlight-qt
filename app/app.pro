@@ -12,10 +12,13 @@ include(../globaldefs.pri)
 
 # Precompile QML files to avoid writing qmlcache on portable versions.
 # Since this binds the app against the Qt runtime version, we will only
-# do this for Windows and Mac, since they ship with the Qt runtime.
-win32|macx {
-    CONFIG(release, debug|release) {
-        CONFIG += qtquickcompiler
+# do this for Windows and Mac (when disable-prebuilts is not defined),
+# since they always ship with the matching build of the Qt runtime.
+!disable-prebuilts {
+    win32|macx {
+        CONFIG(release, debug|release) {
+            CONFIG += qtquickcompiler
+        }
     }
 }
 
@@ -70,7 +73,7 @@ unix:if(!macx|disable-prebuilts) {
 
     !disable-ffmpeg {
         packagesExist(libavcodec) {
-            PKGCONFIG += libavcodec libavutil
+            PKGCONFIG += libavcodec libavutil libswscale
             CONFIG += ffmpeg
 
             !disable-libva {
@@ -145,15 +148,15 @@ unix:if(!macx|disable-prebuilts) {
     }
 }
 win32 {
-    LIBS += -llibssl -llibcrypto -lSDL2 -lSDL2_ttf -lavcodec -lavutil -lopus -ldxgi -ld3d11
-    CONFIG += ffmpeg
+    LIBS += -llibssl -llibcrypto -lSDL2 -lSDL2_ttf -lavcodec -lavutil -lswscale -lopus -ldxgi -ld3d11 -llibplacebo
+    CONFIG += ffmpeg libplacebo
 }
 win32:!winrt {
     CONFIG += soundio discord-rpc
 }
 macx {
     !disable-prebuilts {
-        LIBS += -lssl -lcrypto -lavcodec.61 -lavutil.59 -lopus -framework SDL2 -framework SDL2_ttf
+        LIBS += -lssl.3 -lcrypto.3 -lavcodec.61 -lavutil.59 -lswscale.8 -lopus -framework SDL2 -framework SDL2_ttf
         CONFIG += discord-rpc
     }
 
@@ -251,6 +254,7 @@ ffmpeg {
     DEFINES += HAVE_FFMPEG
     SOURCES += \
         streaming/video/ffmpeg.cpp \
+        streaming/video/ffmpeg-renderers/genhwaccel.cpp \
         streaming/video/ffmpeg-renderers/sdlvid.cpp \
         streaming/video/ffmpeg-renderers/swframemapper.cpp \
         streaming/video/ffmpeg-renderers/pacer/pacer.cpp
@@ -258,6 +262,7 @@ ffmpeg {
     HEADERS += \
         streaming/video/ffmpeg.h \
         streaming/video/ffmpeg-renderers/renderer.h \
+        streaming/video/ffmpeg-renderers/genhwaccel.h \
         streaming/video/ffmpeg-renderers/sdlvid.h \
         streaming/video/ffmpeg-renderers/swframemapper.h \
         streaming/video/ffmpeg-renderers/pacer/pacer.h
@@ -393,6 +398,7 @@ macx {
     message(VideoToolbox renderer selected)
 
     SOURCES += \
+        streaming/video/ffmpeg-renderers/vt_base.mm \
         streaming/video/ffmpeg-renderers/vt_avsamplelayer.mm \
         streaming/video/ffmpeg-renderers/vt_metal.mm
 
@@ -470,7 +476,8 @@ TRANSLATIONS += \
     languages/qml_cs.ts \
     languages/qml_he.ts \
     languages/qml_ckb.ts \
-    languages/qml_lt.ts
+    languages/qml_lt.ts \
+    languages/qml_et.ts
 
 # Additional import path used to resolve QML modules in Qt Creator's code model
 QML_IMPORT_PATH =

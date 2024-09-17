@@ -283,7 +283,8 @@ Flickable {
 
                                 StreamingPreferences.bitrateKbps = StreamingPreferences.getDefaultBitrate(StreamingPreferences.width,
                                                                                                           StreamingPreferences.height,
-                                                                                                          StreamingPreferences.fps);
+                                                                                                          StreamingPreferences.fps,
+                                                                                                          StreamingPreferences.enableYUV444);
                                 slider.value = StreamingPreferences.bitrateKbps
                             }
 
@@ -448,7 +449,8 @@ Flickable {
 
                                 StreamingPreferences.bitrateKbps = StreamingPreferences.getDefaultBitrate(StreamingPreferences.width,
                                                                                                           StreamingPreferences.height,
-                                                                                                          StreamingPreferences.fps);
+                                                                                                          StreamingPreferences.fps,
+                                                                                                          StreamingPreferences.enableYUV444);
                                 slider.value = StreamingPreferences.bitrateKbps
                             }
 
@@ -683,7 +685,7 @@ Flickable {
 
                     stepSize: 500
                     from : 500
-                    to: 150000
+                    to: StreamingPreferences.unlockBitrate ? 500000 : 150000
 
                     snapMode: "SnapOnRelease"
                     width: Math.min(bitrateDesc.implicitWidth, parent.width)
@@ -916,6 +918,46 @@ Flickable {
         }
 
         GroupBox {
+            id: hostSettingsGroupBox
+            width: (parent.width - (parent.leftPadding + parent.rightPadding))
+            padding: 12
+            title: "<font color=\"skyblue\">" + qsTr("Host Settings") + "</font>"
+            font.pointSize: 12
+
+            Column {
+                anchors.fill: parent
+                spacing: 5
+
+                CheckBox {
+                    id: optimizeGameSettingsCheck
+                    width: parent.width
+                    text: qsTr("Optimize game settings for streaming")
+                    font.pointSize:  12
+                    checked: StreamingPreferences.gameOptimizations
+                    onCheckedChanged: {
+                        StreamingPreferences.gameOptimizations = checked
+                    }
+                }
+
+                CheckBox {
+                    id: quitAppAfter
+                    width: parent.width
+                    text: qsTr("Quit app on host PC after ending stream")
+                    font.pointSize: 12
+                    checked: StreamingPreferences.quitAppAfter
+                    onCheckedChanged: {
+                        StreamingPreferences.quitAppAfter = checked
+                    }
+
+                    ToolTip.delay: 1000
+                    ToolTip.timeout: 5000
+                    ToolTip.visible: hovered
+                    ToolTip.text: qsTr("This will close the app or game you are streaming when you end your stream. You will lose any unsaved progress!")
+                }
+            }
+        }
+
+        GroupBox {
             id: uiSettingsGroupBox
             width: (parent.width - (parent.leftPadding + parent.rightPadding))
             padding: 12
@@ -1014,10 +1056,10 @@ Flickable {
                             text: "Svenska" // Swedish
                             val: StreamingPreferences.LANG_SV
                         }
-                        /* ListElement {
+                        ListElement {
                             text: "Türkçe" // Turkish
                             val: StreamingPreferences.LANG_TR
-                        } */
+                        }
                         /* ListElement {
                             text: "Українська" // Ukrainian
                             val: StreamingPreferences.LANG_UK
@@ -1065,6 +1107,10 @@ Flickable {
                         /* ListElement {
                             text: "Lietuvių kalba" // Lithuanian
                             val: StreamingPreferences.LANG_LT
+                        } */
+                        /* ListElement {
+                            text: "Eesti" // Estonian
+                            val: StreamingPreferences.LANG_ET
                         } */
                     }
                     // ::onActivated must be used, as it only listens for when the index is changed by a human
@@ -1491,46 +1537,6 @@ Flickable {
         }
 
         GroupBox {
-            id: hostSettingsGroupBox
-            width: (parent.width - (parent.leftPadding + parent.rightPadding))
-            padding: 12
-            title: "<font color=\"skyblue\">" + qsTr("Host Settings") + "</font>"
-            font.pointSize: 12
-
-            Column {
-                anchors.fill: parent
-                spacing: 5
-
-                CheckBox {
-                    id: optimizeGameSettingsCheck
-                    width: parent.width
-                    text: qsTr("Optimize game settings for streaming")
-                    font.pointSize:  12
-                    checked: StreamingPreferences.gameOptimizations
-                    onCheckedChanged: {
-                        StreamingPreferences.gameOptimizations = checked
-                    }
-                }
-
-                CheckBox {
-                    id: quitAppAfter
-                    width: parent.width
-                    text: qsTr("Quit app on host PC after ending stream")
-                    font.pointSize: 12
-                    checked: StreamingPreferences.quitAppAfter
-                    onCheckedChanged: {
-                        StreamingPreferences.quitAppAfter = checked
-                    }
-
-                    ToolTip.delay: 1000
-                    ToolTip.timeout: 5000
-                    ToolTip.visible: hovered
-                    ToolTip.text: qsTr("This will close the app or game you are streaming when you end your stream. You will lose any unsaved progress!")
-                }
-            }
-        }
-
-        GroupBox {
             id: advancedSettingsGroupBox
             width: (parent.width - (parent.leftPadding + parent.rightPadding))
             padding: 12
@@ -1566,7 +1572,6 @@ Flickable {
 
                     id: decoderComboBox
                     textRole: "text"
-                    enabled: !enableHdr.checked
                     model: ListModel {
                         id: decoderListModel
                         ListElement {
@@ -1588,21 +1593,6 @@ Flickable {
                             StreamingPreferences.videoDecoderSelection = decoderListModel.get(currentIndex).val
                         }
                     }
-
-                    // This handles the state of the enableHdr checkbox changing
-                    onEnabledChanged: {
-                        if (enabled) {
-                            StreamingPreferences.videoDecoderSelection = decoderListModel.get(currentIndex).val
-                        }
-                        else {
-                            StreamingPreferences.videoDecoderSelection = StreamingPreferences.VDS_AUTO
-                        }
-                    }
-
-                    ToolTip.delay: 1000
-                    ToolTip.timeout: 5000
-                    ToolTip.visible: hovered && !enabled
-                    ToolTip.text: qsTr("Enabling HDR overrides manual decoder selections.")
                 }
 
                 Label {
@@ -1683,6 +1673,53 @@ Flickable {
                                       qsTr("The stream will be HDR-capable, but some games may require an HDR monitor on your host PC to enable HDR mode.")
                                     :
                                       qsTr("HDR streaming is not supported on this PC.")
+                }
+
+                CheckBox {
+                    id: enableYUV444
+                    width: parent.width
+                    text: qsTr("Enable YUV 4:4:4 (Experimental)")
+                    font.pointSize: 12
+
+                    checked: StreamingPreferences.enableYUV444
+                    onCheckedChanged: {
+                        // This is called on init, so only reset to default bitrate when checked state changes.
+                        if (StreamingPreferences.enableYUV444 != checked) {
+                            StreamingPreferences.enableYUV444 = checked
+                            StreamingPreferences.bitrateKbps = StreamingPreferences.getDefaultBitrate(StreamingPreferences.width,
+                                                                                                      StreamingPreferences.height,
+                                                                                                      StreamingPreferences.fps,
+                                                                                                      StreamingPreferences.enableYUV444);
+                            slider.value = StreamingPreferences.bitrateKbps
+                        }
+                    }
+
+                    ToolTip.delay: 1000
+                    ToolTip.timeout: 5000
+                    ToolTip.visible: hovered
+                    ToolTip.text: enabled ?
+                                      qsTr("Good for streaming desktop and text-heavy games, but not recommended for fast-paced games.")
+                                    :
+                                      qsTr("YUV 4:4:4 is not supported on this PC.")
+                }
+
+                CheckBox {
+                    id: unlockBitrate
+                    width: parent.width
+                    text: qsTr("Unlock bitrate limit (Experimental)")
+                    font.pointSize: 12
+
+                    checked: StreamingPreferences.unlockBitrate
+                    onCheckedChanged: {
+                        StreamingPreferences.unlockBitrate = checked
+                        StreamingPreferences.bitrateKbps = Math.min(StreamingPreferences.bitrateKbps, slider.to)
+                        slider.value = StreamingPreferences.bitrateKbps
+                    }
+
+                    ToolTip.delay: 1000
+                    ToolTip.timeout: 5000
+                    ToolTip.visible: hovered
+                    ToolTip.text: qsTr("This unlocks extremely high video bitrates for use with Sunshine hosts. It should only be used when streaming over an Ethernet LAN connection.")
                 }
 
                 CheckBox {

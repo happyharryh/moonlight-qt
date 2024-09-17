@@ -175,12 +175,6 @@ CenteredGridView {
                 }
                 NavigableMenuItem {
                     parentMenu: pcContextMenu
-                    text: model.activeAddress
-                    enabled: false
-                    visible: model.online
-                }
-                NavigableMenuItem {
-                    parentMenu: pcContextMenu
                     text: qsTr("View All Apps")
                     onTriggered: {
                         var component = Qt.createComponent("AppView.qml")

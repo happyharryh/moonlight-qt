@@ -1,8 +1,9 @@
 #include "streaming/session.h"
 
 #include <Limelight.h>
-#include <SDL.h>
+#include "SDL_compat.h"
 #include "settings/mappingmanager.h"
+#include "utils.h"
 
 #include <QRegularExpression>
 #include <QtMath>
@@ -189,6 +190,26 @@ Uint32 SdlInputHandler::mouseEmulationTimerCallback(Uint32 interval, void *param
     return interval;
 }
 
+static void updateAnalogStickAxis(short& value, short newValue, bool& dirty)
+{
+#ifdef STEAM_LINK
+    // Use a deadzone on Steam Link to reduce CPU usage from idle joysticks
+    newValue = abs(newValue) < 1500 ? 0 : newValue;
+#endif
+    dirty |= (newValue != value);
+    value = newValue;
+}
+
+static void updateTriggerAxis(unsigned char& value, unsigned char newValue, bool& dirty)
+{
+#ifdef STEAM_LINK
+    // Use a deadzone on Steam Link to reduce CPU usage from idle joysticks
+    newValue = newValue < 10 ? 0 : newValue;
+#endif
+    dirty |= (newValue != value);
+    value = newValue;
+}
+
 static inline
 short calibration(short value, const GamepadState::Calibration::Stick::Axis& axis) {
     if (value <= axis.min)
@@ -211,11 +232,12 @@ void SdlInputHandler::handleControllerAxisEvent(SDL_ControllerAxisEvent* event)
 
     // Batch all pending axis motion events for this gamepad to save CPU time
     SDL_Event nextEvent;
+    bool dirty = false;
     for (;;) {
         switch (event->axis)
         {
             case SDL_CONTROLLER_AXIS_LEFTX:
-                state->lsX = calibration(event->value, state->cal.ls.X);
+                updateAnalogStickAxis(state->lsX, calibration(event->value, state->cal.ls.X), dirty);
                 break;
             case SDL_CONTROLLER_AXIS_LEFTY:
                 // Signed values have one more negative value than
@@ -223,19 +245,19 @@ void SdlInputHandler::handleControllerAxisEvent(SDL_ControllerAxisEvent* event)
                 // could actually cause the value to overflow and
                 // wrap around to be negative again. Avoid that by
                 // capping the value at 32767.
-                state->lsY = -qMax(calibration(event->value, state->cal.ls.Y), (short)-32767);
+                updateAnalogStickAxis(state->lsY, -qMax(calibration(event->value, state->cal.ls.Y), (short)-32767), dirty);
                 break;
             case SDL_CONTROLLER_AXIS_RIGHTX:
-                state->rsX = calibration(event->value, state->cal.rs.X);
+                updateAnalogStickAxis(state->rsX, calibration(event->value, state->cal.rs.X), dirty);
                 break;
             case SDL_CONTROLLER_AXIS_RIGHTY:
-                state->rsY = -qMax(calibration(event->value, state->cal.rs.Y), (short)-32767);
+                updateAnalogStickAxis(state->rsY, -qMax(calibration(event->value, state->cal.rs.Y), (short)-32767), dirty);
                 break;
             case SDL_CONTROLLER_AXIS_TRIGGERLEFT:
-                state->lt = (unsigned char)(event->value * 255UL / 32767);
+                updateTriggerAxis(state->lt, (unsigned char)(event->value * 255UL / 32767), dirty);
                 break;
             case SDL_CONTROLLER_AXIS_TRIGGERRIGHT:
-                state->rt = (unsigned char)(event->value * 255UL / 32767);
+                updateTriggerAxis(state->rt, (unsigned char)(event->value * 255UL / 32767), dirty);
                 break;
             default:
                 SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
@@ -266,11 +288,11 @@ void SdlInputHandler::handleControllerAxisEvent(SDL_ControllerAxisEvent* event)
         state->rsX = state->rsY = 0;
 
     // Only send the gamepad state to the host if it's not in mouse emulation mode
-    if (state->mouseEmulationTimer == 0) {
+    if (state->mouseEmulationTimer == 0 && dirty) {
         sendGamepadState(state);
     }
 
-    if (state->motionState.deviceModel != Cemuhook::SharedResponse::DeviceModel::FULL_GYRO) {
+    if (m_CemuhookServer && state->deviceModel != Cemuhook::SharedResponse::DeviceModel::FULL_GYRO) {
         Cemuhook::Server::send(state);
     }
 }
@@ -423,7 +445,7 @@ void SdlInputHandler::handleControllerButtonEvent(SDL_ControllerButtonEvent* eve
         sendGamepadState(state);
     }
 
-    if (state->motionState.deviceModel != Cemuhook::SharedResponse::DeviceModel::FULL_GYRO) {
+    if (m_CemuhookServer && state->deviceModel != Cemuhook::SharedResponse::DeviceModel::FULL_GYRO) {
         Cemuhook::Server::send(state);
     }
 }
@@ -446,6 +468,15 @@ void SdlInputHandler::handleControllerSensorEvent(SDL_ControllerSensorEvent* eve
             state->lastAccelEventTime = event->timestamp;
 
             LiSendControllerMotionEvent((uint8_t)state->index, LI_MOTION_TYPE_ACCEL, event->data[0], event->data[1], event->data[2]);
+
+            if (m_CemuhookServer) {
+                constexpr float GRAVITY = 9.80665f;
+                state->motion.accX = - event->data[0] / GRAVITY;
+                state->motion.accY = - event->data[1] / GRAVITY;
+                state->motion.accZ = - event->data[2] / GRAVITY;
+                reinterpret_cast<uint64_t&>(state->motion.timestamp) = event->timestamp_us;
+                Cemuhook::Server::send(state);
+            }
         }
         break;
     case SDL_SENSOR_GYRO:
@@ -460,12 +491,17 @@ void SdlInputHandler::handleControllerSensorEvent(SDL_ControllerSensorEvent* eve
                                         event->data[0] * 57.2957795f,
                                         event->data[1] * 57.2957795f,
                                         event->data[2] * 57.2957795f);
+
+            if (m_CemuhookServer) {
+                constexpr float PI_FACTOR = 3.1415926535f * 2 / 312.0f;
+                state->motion.pitch = event->data[0] / PI_FACTOR;
+                state->motion.yaw = - event->data[1] / PI_FACTOR;
+                state->motion.roll = - event->data[2] / PI_FACTOR;
+                reinterpret_cast<uint64_t&>(state->motion.timestamp) = event->timestamp_us;
+                Cemuhook::Server::send(state);
+            }
         }
         break;
-    }
-
-    if (state->motionState.updateByControllerSensorEvent(event)) {
-        Cemuhook::Server::send(state);
     }
 }
 
@@ -491,7 +527,9 @@ void SdlInputHandler::handleControllerTouchpadEvent(SDL_ControllerTouchpadEvent*
         return;
     }
 
-    LiSendControllerTouchEvent((uint8_t)state->index, eventType, event->finger, event->x, event->y, event->pressure);
+    LiSendControllerTouchEvent2((uint8_t)state->index, eventType,
+                                (uint8_t)event->touchpad, event->finger,
+                                event->x, event->y, event->pressure);
 }
 
 #endif
@@ -669,7 +707,8 @@ void SdlInputHandler::handleControllerDeviceEvent(SDL_ControllerDeviceEvent* eve
 
         SDL_JoystickPowerLevel powerLevel = SDL_JoystickCurrentPowerLevel(SDL_GameControllerGetJoystick(state->controller));
 
-        state->motionState = Cemuhook::MotionState();
+        state->deviceModel = Cemuhook::SharedResponse::DeviceModel::NOT_APPLICABLE;
+        state->motion = Cemuhook::DataResponse::MotionData();
 
         state->cal = GamepadState::Calibration();
         QByteArray calibrationStr = qgetenv(QByteArray("STREAM_GAMECONTROLLER_CALIBRATION_GUID_").append(guidStr));
@@ -738,6 +777,9 @@ void SdlInputHandler::handleControllerDeviceEvent(SDL_ControllerDeviceEvent* eve
         }
         if (SDL_GameControllerGetNumTouchpads(state->controller) > 0) {
             capabilities |= LI_CCAP_TOUCHPAD;
+            if (SDL_GameControllerGetNumTouchpads(state->controller) > 1) {
+                capabilities |= LI_CCAP_DUAL_TOUCHPAD;
+            }
         }
         if (SDL_GameControllerHasSensor(state->controller, SDL_SENSOR_ACCEL)) {
             capabilities |= LI_CCAP_ACCEL;
@@ -772,7 +814,32 @@ void SdlInputHandler::handleControllerDeviceEvent(SDL_ControllerDeviceEvent* eve
             type = LI_CTYPE_NINTENDO;
             break;
         default:
-            type = LI_CTYPE_UNKNOWN;
+            // These Steam Controller VID/PID combos come from SDL's controller_list.h
+            // TODO: Use SDL_GAMEPAD_TYPE_STEAM on SDL 3.6+
+            if (vendorId == 0x28de) {
+                switch (productId) {
+                case 0x1101:
+                case 0x1102:
+                case 0x1105:
+                case 0x1106:
+                case 0x1142:
+                case 0x1201:
+                case 0x1202:
+                case 0x1205:
+                case 0x1302:
+                case 0x1303:
+                case 0x1304:
+                case 0x1305:
+                    type = LI_CTYPE_STEAM;
+                    break;
+                default:
+                    type = LI_CTYPE_UNKNOWN;
+                    break;
+                }
+            }
+            else {
+                type = LI_CTYPE_UNKNOWN;
+            }
             break;
         }
 
@@ -785,18 +852,11 @@ void SdlInputHandler::handleControllerDeviceEvent(SDL_ControllerDeviceEvent* eve
             type == LI_CTYPE_PS;
 
         if (m_CemuhookServer) {
-            if (SDL_GameControllerHasSensor(state->controller, SDL_SENSOR_ACCEL)) {
-                SDL_GameControllerSetSensorEnabled(state->controller, SDL_SENSOR_ACCEL, SDL_TRUE);
-            }
-            if (SDL_GameControllerHasSensor(state->controller, SDL_SENSOR_GYRO)) {
-                SDL_GameControllerSetSensorEnabled(state->controller, SDL_SENSOR_GYRO, SDL_TRUE);
-            }
-
             if (SDL_GameControllerIsSensorEnabled(state->controller, SDL_SENSOR_ACCEL) &&
                 SDL_GameControllerIsSensorEnabled(state->controller, SDL_SENSOR_GYRO)) {
-                state->motionState.deviceModel = Cemuhook::SharedResponse::DeviceModel::FULL_GYRO;
+                state->deviceModel = Cemuhook::SharedResponse::DeviceModel::FULL_GYRO;
             } else {
-                state->motionState.deviceModel = Cemuhook::SharedResponse::DeviceModel::DO_NOT_USE;
+                state->deviceModel = Cemuhook::SharedResponse::DeviceModel::DO_NOT_USE;
             }
         }
 
@@ -959,6 +1019,15 @@ void SdlInputHandler::setMotionEventState(uint16_t controllerNumber, uint8_t mot
         return;
     }
 
+    uint16_t reportRateHzLimit;
+    if (Utils::getEnvironmentVariableOverride("SENSOR_REPORT_RATE_LIMIT_HZ", &reportRateHzLimit) &&
+        reportRateHz > reportRateHzLimit) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "Sensor report rate limited to %u Hz by environment variable",
+                    reportRateHzLimit);
+        reportRateHz = reportRateHzLimit;
+    }
+
 #if SDL_VERSION_ATLEAST(2, 0, 14)
     if (m_GamepadState[controllerNumber].controller != nullptr) {
         uint8_t reportPeriodMs = reportRateHz ? (1000 / reportRateHz) : 0;
@@ -992,6 +1061,22 @@ void SdlInputHandler::setControllerLED(uint16_t controllerNumber, uint8_t r, uin
 #endif
 }
 
+void SdlInputHandler::setAdaptiveTriggers(uint16_t controllerNumber, DualSenseOutputReport *report){
+
+#if SDL_VERSION_ATLEAST(2, 0, 16)
+        // Make sure the controller number is within our supported count
+    if (controllerNumber <= MAX_GAMEPADS &&
+        // and we have a valid controller
+        m_GamepadState[controllerNumber].controller != nullptr &&
+        // and it's a PS5 controller
+        SDL_GameControllerGetType(m_GamepadState[controllerNumber].controller) == SDL_CONTROLLER_TYPE_PS5) {
+        SDL_GameControllerSendEffect(m_GamepadState[controllerNumber].controller, report, sizeof(*report));
+    }
+#endif
+
+    SDL_free(report);
+}
+
 QString SdlInputHandler::getUnmappedGamepads()
 {
     QString ret;
@@ -1005,7 +1090,8 @@ QString SdlInputHandler::getUnmappedGamepads()
     MappingManager mappingManager;
     mappingManager.applyMappings();
 
-    for (int i = 0; i < SDL_NumJoysticks(); i++) {
+    int numJoysticks = SDL_NumJoysticks();
+    for (int i = 0; i < numJoysticks; i++) {
         if (!SDL_IsGameController(i)) {
             char guidStr[33];
             SDL_JoystickGetGUIDString(SDL_JoystickGetDeviceGUID(i),
@@ -1065,7 +1151,8 @@ int SdlInputHandler::getAttachedGamepadMask()
     }
 
     count = mask = 0;
-    for (int i = 0; i < SDL_NumJoysticks(); i++) {
+    int numJoysticks = SDL_NumJoysticks();
+    for (int i = 0; i < numJoysticks; i++) {
         if (SDL_IsGameController(i)) {
             char guidStr[33];
             SDL_JoystickGetGUIDString(SDL_JoystickGetDeviceGUID(i),

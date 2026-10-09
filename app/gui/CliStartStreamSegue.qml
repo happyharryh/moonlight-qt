@@ -2,7 +2,6 @@ import QtQuick 2.0
 import QtQuick.Controls 2.2
 
 import ComputerManager 1.0
-import SdlGamepadKeyNavigation 1.0
 
 Item {
     function onSearchingComputer() {
@@ -38,10 +37,6 @@ Item {
         if (!launcher.isExecuted()) {
             toolBar.visible = false
 
-            // Normally this is enabled by PcView, but we will won't
-            // load PcView when streaming from the command-line.
-            SdlGamepadKeyNavigation.enable()
-
             launcher.searchingComputer.connect(onSearchingComputer)
             launcher.searchingApp.connect(onSearchingApp)
             launcher.sessionCreated.connect(onSessionCreated)
@@ -57,6 +52,7 @@ Item {
 
         BusyIndicator {
             id: stageSpinner
+            running: visible
         }
 
         Label {

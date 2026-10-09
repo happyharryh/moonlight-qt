@@ -14,36 +14,6 @@ const QMap<SDL_JoystickPowerLevel, SharedResponse::Battery> SharedResponse::k_Ba
     {SDL_JOYSTICK_POWER_MAX, Battery::FULL}
 };
 
-bool MotionState::updateByControllerSensorEvent(SDL_ControllerSensorEvent* event) {
-    uint64_t &timestamp = reinterpret_cast<uint64_t &>(motion.timestamp);
-    if (event->timestamp_us != timestamp) {
-        accelUpdated = false;
-        gyroUpdated = false;
-        timestamp = event->timestamp_us;
-    }
-
-    if (event->sensor == SDL_SENSOR_ACCEL && !accelUpdated) {
-        constexpr float GRAVITY = 9.80665f;
-        motion.accX = - event->data[0] / GRAVITY;
-        motion.accY = - event->data[1] / GRAVITY;
-        motion.accZ = - event->data[2] / GRAVITY;
-        accelUpdated = true;
-     } else if (event->sensor == SDL_SENSOR_GYRO && !gyroUpdated) {
-        constexpr float PI_FACTOR = 3.1415926535f * 2 / 312.0f;
-        motion.pitch = event->data[0] / PI_FACTOR;
-        motion.yaw = - event->data[1] / PI_FACTOR;
-        motion.roll = - event->data[2] / PI_FACTOR;
-        gyroUpdated = true;
-    } else {
-        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                    "Unhandled controller sensor: %d accelUpdated: %d gyroUpdated: %d",
-                    event->sensor, accelUpdated, gyroUpdated);
-        return false;
-    }
-
-    return accelUpdated && gyroUpdated;
-}
-
 void Server::init(const QHostAddress& addr, uint16_t port, QObject *parent) {
     if (s_Server)
         destroy();
@@ -240,7 +210,7 @@ void Server::handleSend(const GamepadState& state) {
 
     response.shared.slot = state.index;
 
-    response.shared.deviceModel = state.motionState.deviceModel;
+    response.shared.deviceModel = state.deviceModel;
 
     SDL_Joystick* joystick = SDL_JoystickFromInstanceID(state.jsId);
     if (const char* serial = SDL_JoystickGetSerial(joystick)) {
@@ -287,7 +257,7 @@ void Server::handleSend(const GamepadState& state) {
     response.aR2 = state.rt;
     response.aL2 = state.lt;
 
-    memcpy(&response.motion, &state.motionState.motion, sizeof(response.motion));
+    memcpy(&response.motion, &state.motion, sizeof(response.motion));
 
     for (Client& client : m_Clients) {
         response.packetNumber = client.packetNumber++;

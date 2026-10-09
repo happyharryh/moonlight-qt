@@ -1,6 +1,6 @@
 #include "slaud.h"
 
-#include <SDL.h>
+#include "SDL_compat.h"
 
 SLAudioRenderer::SLAudioRenderer()
     : m_AudioContext(nullptr),
@@ -112,11 +112,6 @@ bool SLAudioRenderer::submitAudio(int bytesWritten)
     }
 
     return true;
-}
-
-int SLAudioRenderer::getCapabilities()
-{
-    return CAPABILITY_SLOW_OPUS_DECODER | CAPABILITY_SUPPORTS_ARBITRARY_AUDIO_DURATION;
 }
 
 IAudioRenderer::AudioFormat SLAudioRenderer::getAudioBufferFormat()

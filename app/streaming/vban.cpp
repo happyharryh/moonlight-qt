@@ -2,7 +2,7 @@
 
 namespace Vban {
 
-const QMap<int, Header::SampleRate> Header::k_SampleRateMap {
+const QHash<int, Header::SampleRate> Header::k_SampleRateMap {
     {6000, VBAN_SR_6000},
     {12000, VBAN_SR_12000},
     {24000, VBAN_SR_24000},
@@ -26,7 +26,7 @@ const QMap<int, Header::SampleRate> Header::k_SampleRateMap {
     {705600, VBAN_SR_705600}
 };
 
-const QMap<SDL_AudioFormat, Header::DataType> Header::k_DataTypeMap {
+const QHash<SDL_AudioFormat, Header::DataType> Header::k_DataTypeMap {
     {AUDIO_S8, VBAN_DATATYPE_BYTE8},
     {AUDIO_S16, VBAN_DATATYPE_INT16},
     {AUDIO_S32, VBAN_DATATYPE_INT32},

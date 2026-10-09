@@ -2,6 +2,7 @@
 
 #include <SDL.h>
 
+#include <QHash>
 #include <QUdpSocket>
 #include <QThread>
 
@@ -53,7 +54,7 @@ struct Header {
         VBAN_SR_UNDEFINED_11
     };
     static constexpr uint8_t VBAN_SR_MASK = 0x1F;
-    static const QMap<int, SampleRate> k_SampleRateMap;
+    static const QHash<int, SampleRate> k_SampleRateMap;
 
     enum Protocol : uint8_t {
         VBAN_PROTOCOL_AUDIO         =   0x00,
@@ -78,7 +79,7 @@ struct Header {
         VBAN_DATATYPE_10BITS
     };
     static constexpr uint8_t VBAN_DATATYPE_MASK = 0x07;
-    static const QMap<SDL_AudioFormat, DataType> k_DataTypeMap;
+    static const QHash<SDL_AudioFormat, DataType> k_DataTypeMap;
 
     enum Codec : uint8_t {
         VBAN_CODEC_PCM              =   0x00,

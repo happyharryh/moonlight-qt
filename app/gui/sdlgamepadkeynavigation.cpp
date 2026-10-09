@@ -13,6 +13,7 @@ SdlGamepadKeyNavigation::SdlGamepadKeyNavigation(StreamingPreferences* prefs)
       m_Enabled(false),
       m_UiNavMode(false),
       m_FirstPoll(false),
+      m_HasFocus(false),
       m_LastAxisNavigationEventTime(0)
 {
     m_PollingTimer = new QTimer(this);
@@ -50,11 +51,16 @@ void SdlGamepadKeyNavigation::enable()
     // on first init of the GC subsystem. We can't depend on them due to
     // overlapping lifetimes of SdlGamepadKeyNavigation instances, so we
     // will attach ourselves.
-    SDL_PumpEvents();
+    //
+    // NB: We use SDL_JoystickUpdate() instead of SDL_PumpEvents() because
+    // the latter can do a bit more work that we want (like handling video
+    // events that we intentionally do not want to process yet).
+    SDL_JoystickUpdate();
     SDL_FlushEvent(SDL_CONTROLLERDEVICEADDED);
 
     // Open all currently attached game controllers
-    for (int i = 0; i < SDL_NumJoysticks(); i++) {
+    int numJoysticks = SDL_NumJoysticks();
+    for (int i = 0; i < numJoysticks; i++) {
         if (SDL_IsGameController(i)) {
             SDL_GameController* gc = SDL_GameControllerOpen(i);
             if (gc != nullptr) {
@@ -63,13 +69,10 @@ void SdlGamepadKeyNavigation::enable()
         }
     }
 
-    // Flush events on the first poll
-    m_FirstPoll = true;
-
-    // Poll every 50 ms for a new joystick event
-    m_PollingTimer->start(50);
-
     m_Enabled = true;
+
+    // Start the polling timer if the window is focused
+    updateTimerState();
 }
 
 void SdlGamepadKeyNavigation::disable()
@@ -78,7 +81,9 @@ void SdlGamepadKeyNavigation::disable()
         return;
     }
 
-    m_PollingTimer->stop();
+    m_Enabled = false;
+    updateTimerState();
+    Q_ASSERT(!m_PollingTimer->isActive());
 
     while (!m_Gamepads.isEmpty()) {
         SDL_GameControllerClose(m_Gamepads[0]);
@@ -86,25 +91,31 @@ void SdlGamepadKeyNavigation::disable()
     }
 
     SDL_QuitSubSystem(SDL_INIT_GAMECONTROLLER);
+}
 
-    m_Enabled = false;
+void SdlGamepadKeyNavigation::notifyWindowFocus(bool hasFocus)
+{
+    m_HasFocus = hasFocus;
+    updateTimerState();
 }
 
 void SdlGamepadKeyNavigation::onPollingTimerFired()
 {
     SDL_Event event;
 
+    // Update joystick state without pumping other events (see enable() comment)
+    SDL_JoystickUpdate();
+
     // Discard any pending button events on the first poll to avoid picking up
     // stale input data from the stream session (like the quit combo).
     if (m_FirstPoll) {
-        SDL_PumpEvents();
         SDL_FlushEvent(SDL_CONTROLLERBUTTONDOWN);
         SDL_FlushEvent(SDL_CONTROLLERBUTTONUP);
-
         m_FirstPoll = false;
     }
 
-    while (SDL_PollEvent(&event)) {
+    // Peep events rather than polling to avoid calling SDL_PumpEvents()
+    while (SDL_PeepEvents(&event, 1, SDL_GETEVENT, SDL_FIRSTEVENT, SDL_LASTEVENT) == 1) {
         switch (event.type) {
         case SDL_QUIT:
             // SDL may send us a quit event since we initialize
@@ -207,7 +218,7 @@ void SdlGamepadKeyNavigation::onPollingTimerFired()
     }
 
     // Handle analog sticks by polling
-    for (auto gc : m_Gamepads) {
+    for (auto gc : std::as_const(m_Gamepads)) {
         short leftX = SDL_GameControllerGetAxis(gc, SDL_CONTROLLER_AXIS_LEFTX);
         short leftY = SDL_GameControllerGetAxis(gc, SDL_CONTROLLER_AXIS_LEFTY);
         if (SDL_GetTicks() - m_LastAxisNavigationEventTime < AXIS_NAVIGATION_REPEAT_DELAY) {
@@ -261,6 +272,20 @@ void SdlGamepadKeyNavigation::sendKey(QEvent::Type type, Qt::Key key, Qt::Keyboa
     }
 }
 
+void SdlGamepadKeyNavigation::updateTimerState()
+{
+    if (m_PollingTimer->isActive() && (!m_HasFocus || !m_Enabled)) {
+        m_PollingTimer->stop();
+    }
+    else if (!m_PollingTimer->isActive() && m_HasFocus && m_Enabled) {
+        // Flush events on the first poll
+        m_FirstPoll = true;
+
+        // Poll every 50 ms for a new joystick event
+        m_PollingTimer->start(50);
+    }
+}
+
 void SdlGamepadKeyNavigation::setUiNavMode(bool uiNavMode)
 {
     m_UiNavMode = uiNavMode;
@@ -271,7 +296,8 @@ int SdlGamepadKeyNavigation::getConnectedGamepads()
     Q_ASSERT(m_Enabled);
 
     int count = 0;
-    for (int i = 0; i < SDL_NumJoysticks(); i++) {
+    int numJoysticks = SDL_NumJoysticks();
+    for (int i = 0; i < numJoysticks; i++) {
         if (SDL_IsGameController(i)) {
             count++;
         }

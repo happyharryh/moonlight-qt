@@ -122,16 +122,6 @@ struct DataResponse {
     } motion;
 };
 
-struct MotionState {
-    SharedResponse::DeviceModel deviceModel = SharedResponse::DeviceModel::NOT_APPLICABLE;
-
-    DataResponse::MotionData motion;
-    bool accelUpdated = false;
-    bool gyroUpdated = false;
-
-    bool updateByControllerSensorEvent(SDL_ControllerSensorEvent* event);
-};
-
 class Server : public QUdpSocket {
     Q_OBJECT
 

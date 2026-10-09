@@ -1,6 +1,7 @@
 #include "streamutils.h"
 
 #include <Qt>
+#include <QDir>
 
 #ifdef Q_OS_DARWIN
 #include <ApplicationServices/ApplicationServices.h>
@@ -8,6 +9,13 @@
 
 #ifdef Q_OS_WINDOWS
 #include <Windows.h>
+#endif
+
+#ifdef Q_OS_UNIX
+#include <unistd.h>
+#include <fcntl.h>
+
+#include <SDL_syswm.h>
 #endif
 
 #ifdef Q_OS_LINUX
@@ -60,16 +68,61 @@ static int __riscv_hwprobe(struct riscv_hwprobe *pairs, size_t pair_count,
 #endif
 #endif
 
+#if defined(Q_OS_FREEBSD) || defined(Q_OS_OPENBSD)
+#include <sys/auxv.h>
+#endif
+
 Uint32 StreamUtils::getPlatformWindowFlags()
 {
-#if defined(Q_OS_DARWIN)
-    return SDL_WINDOW_METAL;
-#elif defined(HAVE_LIBPLACEBO_VULKAN)
+#if defined(HAVE_LIBPLACEBO_VULKAN)
     // We'll fall back to GL if Vulkan fails
     return SDL_WINDOW_VULKAN;
+#elif defined(Q_OS_DARWIN)
+    // Vulkan needs to supersede Metal, otherwise the Vulkan library won't be loaded
+    return SDL_WINDOW_METAL;
 #else
     return 0;
 #endif
+}
+
+SDL_Window* StreamUtils::createTestWindow()
+{
+    SDL_Window* testWindow;
+    Uint32 baseFlags = 0;
+
+    // Stop text input before creating the test window to avoid sdl2-compat
+    // starting text input on the new window. This might trigger the IME to
+    // be displayed.
+    SDL_StopTextInput();
+
+    // Test windows are always hidden
+    baseFlags |= SDL_WINDOW_HIDDEN;
+
+    // Creating a Vulkan surface with KMSDRM requires finding a display mode
+    // that exactly matches the window size. This is not always possible,
+    // particularly with drivers (Nvidia) that only expose modes matching
+    // the current resolution (only differing by refresh rate). Fullscreen
+    // desktop mode ensures the window size exactly matches the display mode
+    // which prevents false Vulkan renderer failures during decoder probing.
+    if (QString(SDL_GetCurrentVideoDriver()) == "KMSDRM") {
+        baseFlags |= SDL_WINDOW_FULLSCREEN_DESKTOP;
+    }
+
+    // Try to add the platform-specific flags first and fall back if that fails
+    testWindow = SDL_CreateWindow("", 0, 0, 1280, 720,
+                                  baseFlags | StreamUtils::getPlatformWindowFlags());
+    if (!testWindow) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "Failed to create test window with platform flags: %s",
+                    SDL_GetError());
+
+        testWindow = SDL_CreateWindow("", 0, 0, 1280, 720, baseFlags);
+        if (!testWindow) {
+            return nullptr;
+        }
+    }
+
+    return testWindow;
 }
 
 void StreamUtils::scaleSourceToDestinationSurface(SDL_Rect* src, SDL_Rect* dst)
@@ -168,11 +221,21 @@ bool StreamUtils::hasFastAes()
 #elif defined(Q_OS_DARWIN)
     // Everything that runs Catalina and later has AES-NI or ARMv8 crypto instructions
     return true;
+#elif (defined(Q_OS_FREEBSD) || defined(Q_OS_OPENBSD)) && defined(Q_PROCESSOR_ARM) && QT_POINTER_SIZE == 4
+    unsigned long hwcap2;
+    if (elf_aux_info(AT_HWCAP2, &hwcap2, sizeof(hwcap2)) != 0)
+        hwcap2 = 0;
+    return (hwcap2 & HWCAP2_AES);
+#elif (defined(Q_OS_FREEBSD) || defined(Q_OS_OPENBSD)) && defined(Q_PROCESSOR_ARM) && QT_POINTER_SIZE == 8
+    unsigned long hwcap;
+    if (elf_aux_info(AT_HWCAP, &hwcap, sizeof(hwcap)) != 0)
+        hwcap = 0;
+    return (hwcap & HWCAP_AES);
 #elif defined(Q_OS_LINUX) && defined(Q_PROCESSOR_ARM) && QT_POINTER_SIZE == 4
     return getauxval(AT_HWCAP2) & HWCAP2_AES;
 #elif defined(Q_OS_LINUX) && defined(Q_PROCESSOR_ARM) && QT_POINTER_SIZE == 8
     return getauxval(AT_HWCAP) & HWCAP_AES;
-#elif defined(Q_PROCESSOR_RISCV)
+#elif defined(Q_OS_LINUX) && defined(Q_PROCESSOR_RISCV)
     riscv_hwprobe pairs[1] = {
         { RISCV_HWPROBE_KEY_IMA_EXT_0, 0 },
     };
@@ -200,7 +263,7 @@ bool StreamUtils::getNativeDesktopMode(int displayIndex, SDL_DisplayMode* mode, 
     CGDirectDisplayID displayIds[MAX_DISPLAYS];
     uint32_t displayCount = 0;
     CGGetActiveDisplayList(MAX_DISPLAYS, displayIds, &displayCount);
-    if (displayIndex >= displayCount) {
+    if (displayIndex >= (int)displayCount) {
         return false;
     }
 
@@ -306,3 +369,106 @@ bool StreamUtils::getNativeDesktopMode(int displayIndex, SDL_DisplayMode* mode, 
     return true;
 }
 
+int StreamUtils::getDrmFdForWindow(SDL_Window* window, bool* mustClose)
+{
+    *mustClose = false;
+
+#if defined(SDL_VIDEO_DRIVER_KMSDRM) && SDL_VERSION_ATLEAST(2, 0, 15)
+    SDL_SysWMinfo info;
+    SDL_VERSION(&info.version);
+    if (!SDL_GetWindowWMInfo(window, &info)) {
+        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                     "SDL_GetWindowWMInfo() failed: %s",
+                     SDL_GetError());
+        return -1;
+    }
+
+    if (info.subsystem == SDL_SYSWM_KMSDRM) {
+        // If SDL has an FD, share that
+        if (info.info.kmsdrm.drm_fd >= 0) {
+            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                        "Sharing DRM FD with SDL");
+            return info.info.kmsdrm.drm_fd;
+        }
+        else {
+            char path[128];
+            snprintf(path, sizeof(path), "/dev/dri/card%u", info.info.kmsdrm.dev_index);
+            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                        "Opening DRM FD from SDL by path: %s",
+                        path);
+            int fd = open(path, O_RDWR | O_CLOEXEC);
+            if (fd >= 0) {
+                *mustClose = true;
+            }
+            return fd;
+        }
+    }
+#else
+    Q_UNUSED(window);
+#endif
+
+    return -1;
+}
+
+int StreamUtils::getDrmFd(bool preferRenderNode)
+{
+#ifdef Q_OS_UNIX
+    const char* userDevice = SDL_getenv("DRM_DEV");
+    if (userDevice != nullptr) {
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                    "Opening user-specified DRM device: %s",
+                    userDevice);
+
+        return open(userDevice, O_RDWR | O_CLOEXEC);
+    }
+    else {
+        QDir driDir("/dev/dri");
+        int fd;
+
+        // We have to explicitly ask for devices to be returned
+        driDir.setFilter(QDir::Files | QDir::System);
+
+        if (preferRenderNode) {
+            // Try a render node first since we aren't using DRM for output in this codepath
+            for (QFileInfo& node : driDir.entryInfoList(QStringList("renderD*"))) {
+                QByteArray absolutePath = node.absoluteFilePath().toUtf8();
+                fd = open(absolutePath.constData(), O_RDWR | O_CLOEXEC);
+                if (fd >= 0) {
+                    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                                "Opened DRM render node: %s",
+                                absolutePath.constData());
+                    return fd;
+                }
+            }
+        }
+
+        // If that fails, try to use a primary node and hope for the best
+        for (QFileInfo& node : driDir.entryInfoList(QStringList("card*"))) {
+            QByteArray absolutePath = node.absoluteFilePath().toUtf8();
+            fd = open(absolutePath.constData(), O_RDWR | O_CLOEXEC);
+            if (fd >= 0) {
+                SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                            "Opened DRM primary node: %s",
+                            absolutePath.constData());
+                return fd;
+            }
+        }
+    }
+#else
+    Q_UNUSED(preferRenderNode);
+#endif
+
+    return -1;
+}
+
+extern QAtomicInt g_AsyncLoggingEnabled;
+
+void StreamUtils::enterAsyncLoggingMode()
+{
+    g_AsyncLoggingEnabled.ref();
+}
+
+void StreamUtils::exitAsyncLoggingMode()
+{
+    g_AsyncLoggingEnabled.deref();
+}

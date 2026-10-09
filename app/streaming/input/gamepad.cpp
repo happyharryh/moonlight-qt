@@ -470,11 +470,7 @@ void SdlInputHandler::handleControllerSensorEvent(SDL_ControllerSensorEvent* eve
             LiSendControllerMotionEvent((uint8_t)state->index, LI_MOTION_TYPE_ACCEL, event->data[0], event->data[1], event->data[2]);
 
             if (m_CemuhookServer) {
-                constexpr float GRAVITY = 9.80665f;
-                state->motion.accX = - event->data[0] / GRAVITY;
-                state->motion.accY = - event->data[1] / GRAVITY;
-                state->motion.accZ = - event->data[2] / GRAVITY;
-                reinterpret_cast<uint64_t&>(state->motion.timestamp) = event->timestamp_us;
+                state->lastAccelEventTime_us = event->timestamp_us;
                 Cemuhook::Server::send(state);
             }
         }
@@ -493,11 +489,6 @@ void SdlInputHandler::handleControllerSensorEvent(SDL_ControllerSensorEvent* eve
                                         event->data[2] * 57.2957795f);
 
             if (m_CemuhookServer) {
-                constexpr float PI_FACTOR = 3.1415926535f * 2 / 312.0f;
-                state->motion.pitch = event->data[0] / PI_FACTOR;
-                state->motion.yaw = - event->data[1] / PI_FACTOR;
-                state->motion.roll = - event->data[2] / PI_FACTOR;
-                reinterpret_cast<uint64_t&>(state->motion.timestamp) = event->timestamp_us;
                 Cemuhook::Server::send(state);
             }
         }
@@ -708,7 +699,7 @@ void SdlInputHandler::handleControllerDeviceEvent(SDL_ControllerDeviceEvent* eve
         SDL_JoystickPowerLevel powerLevel = SDL_JoystickCurrentPowerLevel(SDL_GameControllerGetJoystick(state->controller));
 
         state->deviceModel = Cemuhook::SharedResponse::DeviceModel::NOT_APPLICABLE;
-        state->motion = Cemuhook::DataResponse::MotionData();
+        state->lastAccelEventTime_us = 0;
 
         state->cal = GamepadState::Calibration();
         QByteArray calibrationStr = qgetenv(QByteArray("STREAM_GAMECONTROLLER_CALIBRATION_GUID_").append(guidStr));

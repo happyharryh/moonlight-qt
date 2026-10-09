@@ -122,7 +122,7 @@ void Server::handleReceive() {
                 }
             };
 
-            for (size_t i = 0; i < request.info.slotNumber; ++i) {
+            for (int32_t i = 0; i < request.info.slotNumber; ++i) {
                 uint8_t slot = request.info.slot[i];
                 if (slot >= MAX_GAMEPADS)
                     continue;
@@ -141,9 +141,9 @@ void Server::handleReceive() {
                     }
 
                     if (const char* serial = SDL_JoystickGetSerial(joystick)) {
-                        sscanf_s(serial, "%hhx-%hhx-%hhx-%hhx-%hhx-%hhx",
-                                 &response.shared.mac[0], &response.shared.mac[1], &response.shared.mac[2],
-                                 &response.shared.mac[3], &response.shared.mac[4], &response.shared.mac[5]);
+                        sscanf(serial, "%2hhx-%2hhx-%2hhx-%2hhx-%2hhx-%2hhx",
+                               &response.shared.mac[0], &response.shared.mac[1], &response.shared.mac[2],
+                               &response.shared.mac[3], &response.shared.mac[4], &response.shared.mac[5]);
                     } else {
                         memset(response.shared.mac, 0, sizeof(response.shared.mac));
                     }
@@ -214,9 +214,9 @@ void Server::handleSend(const GamepadState& state) {
 
     SDL_Joystick* joystick = SDL_JoystickFromInstanceID(state.jsId);
     if (const char* serial = SDL_JoystickGetSerial(joystick)) {
-        sscanf_s(serial, "%hhx-%hhx-%hhx-%hhx-%hhx-%hhx",
-                 &response.shared.mac[0], &response.shared.mac[1], &response.shared.mac[2],
-                 &response.shared.mac[3], &response.shared.mac[4], &response.shared.mac[5]);
+        sscanf(serial, "%2hhx-%2hhx-%2hhx-%2hhx-%2hhx-%2hhx",
+               &response.shared.mac[0], &response.shared.mac[1], &response.shared.mac[2],
+               &response.shared.mac[3], &response.shared.mac[4], &response.shared.mac[5]);
     } else {
         memset(response.shared.mac, 0, sizeof(response.shared.mac));
     }
@@ -257,7 +257,19 @@ void Server::handleSend(const GamepadState& state) {
     response.aR2 = state.rt;
     response.aL2 = state.lt;
 
-    memcpy(&response.motion, &state.motion, sizeof(response.motion));
+#if SDL_VERSION_ATLEAST(2, 0, 14)
+    reinterpret_cast<uint64_t &>(response.motion.timestamp) = state.lastAccelEventTime_us;
+
+    constexpr float GRAVITY = 9.80665f;
+    response.motion.accX = - state.lastAccelEventData[0] / GRAVITY;
+    response.motion.accY = - state.lastAccelEventData[1] / GRAVITY;
+    response.motion.accZ = - state.lastAccelEventData[2] / GRAVITY;
+
+    constexpr float PI_FACTOR = 3.1415926535f * 2 / 312.0f;
+    response.motion.pitch = state.lastGyroEventData[0] / PI_FACTOR;
+    response.motion.yaw = - state.lastGyroEventData[1] / PI_FACTOR;
+    response.motion.roll = - state.lastGyroEventData[2] / PI_FACTOR;
+#endif
 
     for (Client& client : m_Clients) {
         response.packetNumber = client.packetNumber++;

@@ -39,7 +39,7 @@ struct GamepadState {
     unsigned char lt, rt;
 
     Cemuhook::SharedResponse::DeviceModel deviceModel;
-    Cemuhook::DataResponse::MotionData motion;
+    uint64_t lastAccelEventTime_us;
 
     struct Calibration {
         struct Stick {

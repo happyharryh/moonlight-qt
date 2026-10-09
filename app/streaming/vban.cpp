@@ -105,7 +105,7 @@ bool Emitter::bind(const QHostAddress& addr, uint16_t port) {
     m_Packet.header.format_nbc = obtained.channels - 1;
     m_Packet.header.format_bit = (Header::k_DataTypeMap[obtained.format] & Header::VBAN_DATATYPE_MASK) |
                                  (Header::VBAN_CODEC_PCM & Header::VBAN_CODEC_MASK);
-    strcpy_s(m_Packet.header.streamname, STREAM_NAME);
+    strcpy(m_Packet.header.streamname, STREAM_NAME);
 
     for (uint16_t div = 1; div <= obtained.samples; ++div) {
         if (obtained.samples % div == 0 && obtained.samples / div - 1 <= 0xFF
